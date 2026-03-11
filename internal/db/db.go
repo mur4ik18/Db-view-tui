@@ -24,6 +24,12 @@ type Session struct {
 	Schema string
 }
 
+type PreviewFilter struct {
+	Column   string
+	Include  string
+	Excludes []string
+}
+
 func Open(ctx context.Context, cfg *config.Config, opts Options) (*Session, error) {
 	label, connConfig, err := Resolve(ctx, cfg, opts)
 	if err != nil {
@@ -218,7 +224,7 @@ func QuoteIdentifier(value string) string {
 	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
 }
 
-func BuildPreviewQuery(schema string, table string, limit int, offset int, sortColumn string, sortDesc bool, filterColumn string, filterValue string) (string, []any) {
+func BuildPreviewQuery(schema string, table string, limit int, offset int, sortColumn string, sortDesc bool, filters []PreviewFilter) (string, []any) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -230,18 +236,57 @@ func BuildPreviewQuery(schema string, table string, limit int, offset int, sortC
 	}
 
 	var builder strings.Builder
-	args := make([]any, 0, 3)
+	args := make([]any, 0, 8)
 	builder.WriteString("SELECT * FROM ")
 	builder.WriteString(QuoteIdentifier(schema))
 	builder.WriteString(".")
 	builder.WriteString(QuoteIdentifier(table))
 
-	if filterColumn != "" && strings.TrimSpace(filterValue) != "" {
-		args = append(args, "%"+filterValue+"%")
-		builder.WriteString(" WHERE CAST(")
-		builder.WriteString(QuoteIdentifier(filterColumn))
-		builder.WriteString(" AS text) ILIKE $")
-		builder.WriteString(fmt.Sprint(len(args)))
+	hasWhere := false
+	for _, filter := range filters {
+		column := strings.TrimSpace(filter.Column)
+		include := strings.TrimSpace(filter.Include)
+		if column == "" || (include == "" && len(filter.Excludes) == 0) {
+			continue
+		}
+		if hasWhere {
+			builder.WriteString(" AND ")
+		} else {
+			builder.WriteString(" WHERE ")
+			hasWhere = true
+		}
+		builder.WriteString("(")
+
+		wroteClause := false
+		if include != "" {
+			args = append(args, "%"+include+"%")
+			builder.WriteString("CAST(")
+			builder.WriteString(QuoteIdentifier(column))
+			builder.WriteString(" AS text) ILIKE $")
+			builder.WriteString(fmt.Sprint(len(args)))
+			wroteClause = true
+		}
+
+		for _, excludeValue := range filter.Excludes {
+			excludeValue = strings.TrimSpace(excludeValue)
+			if excludeValue == "" {
+				continue
+			}
+			if wroteClause {
+				builder.WriteString(" AND ")
+			}
+			args = append(args, "%"+excludeValue+"%")
+			builder.WriteString("CAST(")
+			builder.WriteString(QuoteIdentifier(column))
+			builder.WriteString(" AS text) NOT ILIKE $")
+			builder.WriteString(fmt.Sprint(len(args)))
+			wroteClause = true
+		}
+
+		if !wroteClause {
+			builder.WriteString("TRUE")
+		}
+		builder.WriteString(")")
 	}
 
 	if sortColumn != "" {
@@ -264,7 +309,7 @@ func BuildPreviewQuery(schema string, table string, limit int, offset int, sortC
 }
 
 func BuildPreviewSQL(schema string, table string, limit int, offset int) string {
-	sql, _ := BuildPreviewQuery(schema, table, limit, offset, "", false, "", "")
+	sql, _ := BuildPreviewQuery(schema, table, limit, offset, "", false, nil)
 	return sql
 }
 

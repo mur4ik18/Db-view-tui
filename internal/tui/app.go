@@ -156,8 +156,9 @@ type model struct {
 	dataEOF         bool
 	dataSortCol     string
 	dataSortDesc    bool
-	dataFilterCol   string
-	dataFilterValue string
+	dataFilters     []db.PreviewFilter
+	dataInspect     viewport.Model
+	dataInspectOpen bool
 }
 
 func Run(opts Options) error {
@@ -169,7 +170,7 @@ func Run(opts Options) error {
 
 func newModel(opts Options) model {
 	schemaArg := textinput.New()
-	schemaArg.Placeholder = "limit or search text"
+	schemaArg.Placeholder = "limit search -exclude"
 	schemaArg.CharLimit = 256
 	schemaArg.Width = 24
 
@@ -221,6 +222,7 @@ func newModel(opts Options) model {
 		execVars:          execVars,
 		execResult:        viewport.New(0, 0),
 		detail:            viewport.New(0, 0),
+		dataInspect:       viewport.New(0, 0),
 		execFocus:         0,
 		execDryRun:        false,
 		execTransaction:   false,
@@ -253,6 +255,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.schemaSwitchOpen {
 			return m.handleSchemaSwitchKeys(msg)
+		}
+		if m.dataInspectOpen {
+			return m.handleDataInspectKeys(msg)
+		}
+		if m.activeTab == tabSchema && m.schemaArgEdit {
+			return m.handleSchemaKeys(msg)
 		}
 		switch msg.String() {
 		case "ctrl+c", "q":
@@ -439,6 +447,9 @@ func (m model) View() string {
 	}
 	if m.schemaSwitchOpen {
 		body = m.viewSchemaSwitchScreen()
+	}
+	if m.dataInspectOpen {
+		body = m.viewDataInspectScreen()
 	}
 	footer := m.viewFooter()
 
@@ -642,6 +653,10 @@ func (m *model) handleSchemaKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.schemaIndex++
 		}
 	case "a", "/":
+		if m.showingDataPreview() {
+			m.schemaArg.SetValue(m.selectedColumnFilterInput())
+			m.schemaArg.CursorEnd()
+		}
 		m.schemaArgEdit = true
 		m.schemaArg.Focus()
 		m.status = "Edit schema argument"
@@ -698,8 +713,7 @@ func (m *model) handleSchemaKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			max(100, m.dataPageSize),
 			m.dataSortCol,
 			m.dataSortDesc,
-			m.dataFilterCol,
-			m.dataFilterValue,
+			m.dataFilters,
 		)
 	case "r":
 		if !m.showingDataPreview() {
@@ -708,8 +722,7 @@ func (m *model) handleSchemaKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.schemaArg.SetValue("")
 		m.dataSortCol = ""
 		m.dataSortDesc = false
-		m.dataFilterCol = ""
-		m.dataFilterValue = ""
+		m.dataFilters = nil
 		m.busy = true
 		return m, runDataPreviewCmd(
 			m.opts,
@@ -719,9 +732,40 @@ func (m *model) handleSchemaKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			max(100, m.dataPageSize),
 			"",
 			false,
-			"",
-			"",
+			nil,
 		)
+	case "d":
+		if !m.showingDataPreview() {
+			break
+		}
+		column := m.selectedDataColumnName()
+		if column == "" {
+			m.status = "No column selected"
+			return m, nil
+		}
+		if !m.removeDataFilter(column) {
+			m.status = "No filter on column: " + column
+			return m, nil
+		}
+		m.schemaArg.SetValue("")
+		m.busy = true
+		return m, runDataPreviewCmd(
+			m.opts,
+			m.effectiveConnection(),
+			m.effectiveSchema(),
+			m.selectedTable,
+			max(100, m.dataPageSize),
+			m.dataSortCol,
+			m.dataSortDesc,
+			m.dataFilters,
+		)
+	case "v":
+		if !m.showingDataPreview() || len(m.dataColumns) == 0 || len(m.dataRows) == 0 {
+			m.status = "Load data first"
+			return m, nil
+		}
+		m.openDataInspect()
+		return m, nil
 	case "enter":
 		if m.showingDataPreview() {
 			m.dataFocus = true
@@ -858,6 +902,37 @@ func (m *model) handleSchemaSwitchKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m *model) handleDataInspectKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "enter", "v":
+		m.dataInspectOpen = false
+		m.status = m.dataStatus()
+		return m, nil
+	case "up", "k":
+		m.dataInspect.LineUp(1)
+		return m, nil
+	case "down", "j":
+		m.dataInspect.LineDown(1)
+		return m, nil
+	case "pgup":
+		m.dataInspect.HalfViewUp()
+		return m, nil
+	case "pgdown":
+		m.dataInspect.HalfViewDown()
+		return m, nil
+	case "home", "g":
+		m.dataInspect.GotoTop()
+		return m, nil
+	case "end", "G":
+		m.dataInspect.GotoBottom()
+		return m, nil
+	}
+
+	var cmd tea.Cmd
+	m.dataInspect, cmd = m.dataInspect.Update(msg)
+	return m, cmd
+}
+
 func (m *model) handleSchemaTablePickerKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	filtered := m.filteredSchemaTables()
 
@@ -947,14 +1022,10 @@ func (m *model) runSchemaAction() (tea.Model, tea.Cmd) {
 			m.busy = false
 			return m, nil
 		}
-		limit, filter := parseDataArgs(arg, 100)
+		limit, filter, excludes := parseDataArgs(arg, 100)
 		m.dataPageSize = max(100, limit)
-		if m.selectedDataColumnName() != "" {
-			m.dataFilterCol = m.selectedDataColumnName()
-			m.dataFilterValue = filter
-		} else if filter == "" {
-			m.dataFilterCol = ""
-			m.dataFilterValue = ""
+		if column := m.selectedDataColumnName(); column != "" {
+			m.upsertDataFilter(column, filter, excludes)
 		}
 		return m, runDataPreviewCmd(
 			m.opts,
@@ -964,8 +1035,7 @@ func (m *model) runSchemaAction() (tea.Model, tea.Cmd) {
 			m.dataPageSize,
 			m.dataSortCol,
 			m.dataSortDesc,
-			m.dataFilterCol,
-			m.dataFilterValue,
+			m.dataFilters,
 		)
 	case "Indexes":
 		return m, runSchemaCmd(m.opts, name, m.effectiveSchema(), "Indexes", db.IndexesSQL(arg != ""), anyOrNone(arg)...)
@@ -1011,6 +1081,8 @@ func (m *model) resize() {
 	m.schemaArg.Width = max(18, min(26, m.width-40))
 	m.execPath.Width = max(24, m.width-8)
 	m.execPattern.Width = max(16, min(40, m.width-8))
+	m.dataInspect.Width = max(24, min(100, m.width-10))
+	m.dataInspect.Height = max(8, m.height-12)
 
 	for i := range m.formFields {
 		m.formFields[i].Width = max(24, min(56, m.width-14))
@@ -1039,8 +1111,9 @@ func (m *model) clearDataPreview() {
 	m.dataEOF = false
 	m.dataSortCol = ""
 	m.dataSortDesc = false
-	m.dataFilterCol = ""
-	m.dataFilterValue = ""
+	m.dataFilters = nil
+	m.dataInspectOpen = false
+	m.dataInspect.SetContent("")
 }
 
 func (m model) hasDataPreview() bool {
@@ -1351,8 +1424,7 @@ func (m *model) maybeLoadMoreData() tea.Cmd {
 		max(100, m.dataPageSize),
 		m.dataSortCol,
 		m.dataSortDesc,
-		m.dataFilterCol,
-		m.dataFilterValue,
+		m.dataFilters,
 	)
 }
 
@@ -1378,6 +1450,132 @@ func (m model) dataStatus() string {
 	return status
 }
 
+func (m *model) upsertDataFilter(column string, include string, excludes []string) {
+	column = strings.TrimSpace(column)
+	include = strings.TrimSpace(include)
+	cleanExcludes := make([]string, 0, len(excludes))
+	for _, exclude := range excludes {
+		exclude = strings.TrimSpace(exclude)
+		if exclude != "" {
+			cleanExcludes = append(cleanExcludes, exclude)
+		}
+	}
+
+	filterIndex := -1
+	for i, filter := range m.dataFilters {
+		if strings.EqualFold(filter.Column, column) {
+			filterIndex = i
+			break
+		}
+	}
+
+	if include == "" && len(cleanExcludes) == 0 {
+		if filterIndex >= 0 {
+			m.dataFilters = append(m.dataFilters[:filterIndex], m.dataFilters[filterIndex+1:]...)
+		}
+		return
+	}
+
+	filter := db.PreviewFilter{
+		Column:   column,
+		Include:  include,
+		Excludes: cleanExcludes,
+	}
+	if filterIndex >= 0 {
+		m.dataFilters[filterIndex] = filter
+		return
+	}
+	m.dataFilters = append(m.dataFilters, filter)
+}
+
+func (m model) formatDataFilter(filter db.PreviewFilter) string {
+	parts := make([]string, 0, 1+len(filter.Excludes))
+	if strings.TrimSpace(filter.Include) != "" {
+		parts = append(parts, filter.Include)
+	}
+	for _, exclude := range filter.Excludes {
+		if strings.TrimSpace(exclude) != "" {
+			parts = append(parts, "-"+exclude)
+		}
+	}
+	return filter.Column + ": " + strings.Join(parts, " ")
+}
+
+func (m model) selectedColumnFilterInput() string {
+	column := m.selectedDataColumnName()
+	if column == "" {
+		return ""
+	}
+	for _, filter := range m.dataFilters {
+		if !strings.EqualFold(filter.Column, column) {
+			continue
+		}
+		parts := make([]string, 0, 1+len(filter.Excludes))
+		if strings.TrimSpace(filter.Include) != "" {
+			parts = append(parts, filter.Include)
+		}
+		for _, exclude := range filter.Excludes {
+			if strings.TrimSpace(exclude) != "" {
+				parts = append(parts, "-"+exclude)
+			}
+		}
+		return strings.Join(parts, " ")
+	}
+	return ""
+}
+
+func (m *model) removeDataFilter(column string) bool {
+	for i, filter := range m.dataFilters {
+		if !strings.EqualFold(filter.Column, column) {
+			continue
+		}
+		m.dataFilters = append(m.dataFilters[:i], m.dataFilters[i+1:]...)
+		return true
+	}
+	return false
+}
+
+func (m *model) openDataInspect() {
+	m.dataInspectOpen = true
+	m.dataInspect.GotoTop()
+	m.dataInspect.SetContent(m.dataInspectContent())
+	m.status = "Cell details"
+}
+
+func (m model) dataInspectContent() string {
+	if len(m.dataRows) == 0 || len(m.dataColumns) == 0 {
+		return "No data selected."
+	}
+	rowIndex := min(max(0, m.dataSelectedRow), len(m.dataRows)-1)
+	colIndex := min(max(0, m.dataSelectedCol), len(m.dataColumns)-1)
+	row := m.dataRows[rowIndex]
+	column := m.dataColumns[colIndex]
+	value := ""
+	if colIndex < len(row) {
+		value = row[colIndex]
+	}
+
+	lines := []string{
+		fmt.Sprintf("Row: %d", rowIndex+1),
+		fmt.Sprintf("Column: %s", column),
+		"",
+		"Selected value",
+		value,
+		"",
+		"Full row",
+	}
+	for i, name := range m.dataColumns {
+		cell := ""
+		if i < len(row) {
+			cell = row[i]
+		}
+		lines = append(lines, name+":")
+		lines = append(lines, cell)
+		lines = append(lines, "")
+	}
+	return strings.Join(lines, "\n")
+}
+
 func (m model) dataSortLabel() string {
 	if m.dataSortCol == "" {
 		return ""
@@ -1390,10 +1588,25 @@ func (m model) dataSortLabel() string {
 }
 
 func (m model) dataFilterLabel() string {
-	if m.dataFilterCol == "" || m.dataFilterValue == "" {
+	if len(m.dataFilters) == 0 {
 		return ""
 	}
-	return shorten(m.dataFilterCol+"~"+m.dataFilterValue, 28)
+	parts := make([]string, 0, len(m.dataFilters))
+	for _, filter := range m.dataFilters {
+		label := filter.Column + "~"
+		chunks := make([]string, 0, 1+len(filter.Excludes))
+		if strings.TrimSpace(filter.Include) != "" {
+			chunks = append(chunks, filter.Include)
+		}
+		for _, exclude := range filter.Excludes {
+			if strings.TrimSpace(exclude) != "" {
+				chunks = append(chunks, "-"+exclude)
+			}
+		}
+		label += strings.Join(chunks, " ")
+		parts = append(parts, label)
+	}
+	return shorten(strings.Join(parts, "; "), 48)
 }
 
 func (m model) renderDataCell(value string, width int, selectedRow bool, selectedColumn bool, pinnedColumn bool) string {
@@ -1652,7 +1865,14 @@ func (m model) viewSchema() string {
 	if m.showingDataPreview() {
 		left = append(left, "", "Pinned", shorten(displayOr(m.dataPinnedCol, "-"), leftWidth-4))
 		left = append(left, "Sort", shorten(displayOr(m.dataSortLabel(), "-"), leftWidth-4))
-		left = append(left, "Find", shorten(displayOr(m.dataFilterLabel(), "-"), leftWidth-4))
+		if len(m.dataFilters) == 0 {
+			left = append(left, "Filters", "-")
+		} else {
+			left = append(left, "Filters", shorten(fmt.Sprintf("%d active", len(m.dataFilters)), leftWidth-4))
+			for _, filter := range m.dataFilters {
+				left = append(left, shorten(m.formatDataFilter(filter), leftWidth-4))
+			}
+		}
 	}
 	left = append(left, "", "Argument", m.schemaArg.View())
 
@@ -1722,7 +1942,7 @@ func (m model) viewFooter() string {
 	case tabConnections:
 		help = "enter select  u default  t test  n new  e edit  d delete  s schema"
 	case tabSchema:
-		help = "enter load/run  arrows move data  o sort  a search  f pin  r reset  tab/esc back  s schema  x clear table"
+		help = "enter load/run  arrows move data  v details  o sort  a search  d drop-filter  f pin  r reset  tab/esc back  s schema  x clear table"
 	case tabQuery:
 		help = "ctrl+e run  ctrl+k clear  s schema"
 	case tabExec:
@@ -1761,6 +1981,34 @@ func (m model) viewSchemaSwitchScreen() string {
 		Border(lipgloss.DoubleBorder()).
 		Padding(1, 2).
 		Width(min(48, m.width-4)).
+		Render(strings.Join(lines, "\n"))
+
+	return lipgloss.NewStyle().
+		Width(max(20, m.width)).
+		Height(max(8, m.height-5)).
+		Align(lipgloss.Center, lipgloss.Center).
+		Render(card)
+}
+
+func (m model) viewDataInspectScreen() string {
+	title := "Cell details"
+	if column := m.selectedDataColumnName(); column != "" {
+		title = "Cell details: " + column
+	}
+
+	lines := []string{
+		title,
+		"",
+		m.dataInspect.View(),
+		"",
+		"esc/enter/v close, arrows scroll",
+	}
+
+	card := lipgloss.NewStyle().
+		Border(lipgloss.DoubleBorder()).
+		Padding(1, 2).
+		Width(max(28, min(104, m.width-6))).
+		Height(max(10, min(m.height-6, m.dataInspect.Height+6))).
 		Render(strings.Join(lines, "\n"))
 
 	return lipgloss.NewStyle().
@@ -1895,7 +2143,7 @@ func runSchemaCmd(opts Options, name string, schema string, title string, sql st
 	}
 }
 
-func runDataPreviewCmd(opts Options, name string, schema string, table string, limit int, sortColumn string, sortDesc bool, filterColumn string, filterValue string) tea.Cmd {
+func runDataPreviewCmd(opts Options, name string, schema string, table string, limit int, sortColumn string, sortDesc bool, filters []db.PreviewFilter) tea.Cmd {
 	return func() tea.Msg {
 		session, err := openSession(opts, name, schema)
 		if err != nil {
@@ -1903,7 +2151,7 @@ func runDataPreviewCmd(opts Options, name string, schema string, table string, l
 		}
 		defer session.Conn.Close(context.Background())
 
-		sql, args := db.BuildPreviewQuery(schema, table, limit, 0, sortColumn, sortDesc, filterColumn, filterValue)
+		sql, args := db.BuildPreviewQuery(schema, table, limit, 0, sortColumn, sortDesc, filters)
 		columns, rows, _, err := db.Query(context.Background(), session.Conn, sql, args...)
 		if err != nil {
 			return dataPageMsg{title: "Data " + table, schema: schema, table: table, pageSize: limit, err: err}
@@ -1919,7 +2167,7 @@ func runDataPreviewCmd(opts Options, name string, schema string, table string, l
 	}
 }
 
-func loadMoreDataCmd(opts Options, name string, schema string, table string, offset int, limit int, sortColumn string, sortDesc bool, filterColumn string, filterValue string) tea.Cmd {
+func loadMoreDataCmd(opts Options, name string, schema string, table string, offset int, limit int, sortColumn string, sortDesc bool, filters []db.PreviewFilter) tea.Cmd {
 	return func() tea.Msg {
 		session, err := openSession(opts, name, schema)
 		if err != nil {
@@ -1927,7 +2175,7 @@ func loadMoreDataCmd(opts Options, name string, schema string, table string, off
 		}
 		defer session.Conn.Close(context.Background())
 
-		sql, args := db.BuildPreviewQuery(schema, table, limit, offset, sortColumn, sortDesc, filterColumn, filterValue)
+		sql, args := db.BuildPreviewQuery(schema, table, limit, offset, sortColumn, sortDesc, filters)
 		columns, rows, _, err := db.Query(context.Background(), session.Conn, sql, args...)
 		if err != nil {
 			return dataPageMsg{title: "Data " + table, schema: schema, table: table, offset: offset, pageSize: limit, err: err}
@@ -2158,18 +2406,23 @@ func parseTableAndLimit(value string, fallback int) (string, int) {
 	return parts[0], parseInt(parts[1], fallback)
 }
 
-func parseDataArgs(value string, fallback int) (int, string) {
+func parseDataArgs(value string, fallback int) (int, string, []string) {
 	parts := strings.Fields(strings.TrimSpace(value))
 	limit := fallback
 	filterParts := make([]string, 0, len(parts))
+	excludeParts := make([]string, 0, len(parts))
 	for _, part := range parts {
 		if number, err := strconv.Atoi(part); err == nil {
 			limit = number
 			continue
 		}
+		if strings.HasPrefix(part, "-") && len(part) > 1 {
+			excludeParts = append(excludeParts, strings.TrimPrefix(part, "-"))
+			continue
+		}
 		filterParts = append(filterParts, part)
 	}
-	return limit, strings.Join(filterParts, " ")
+	return limit, strings.Join(filterParts, " "), excludeParts
 }
 
 func splitQualifiedTable(value string) (string, string) {
