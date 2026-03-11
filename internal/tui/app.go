@@ -82,6 +82,17 @@ type schemaTablesMsg struct {
 	err    error
 }
 
+type dataPageMsg struct {
+	title    string
+	schema   string
+	table    string
+	columns  []string
+	rows     [][]string
+	offset   int
+	pageSize int
+	err      error
+}
+
 type model struct {
 	opts Options
 
@@ -132,12 +143,17 @@ type model struct {
 	schemaTableIndex      int
 	schemaTableFocus      bool
 
-	dataColumns   []string
-	dataRows      [][]string
-	dataRowOffset int
-	dataColOffset int
-	dataFocus     bool
-	dataPinnedCol string
+	dataColumns     []string
+	dataRows        [][]string
+	dataRowOffset   int
+	dataColOffset   int
+	dataFocus       bool
+	dataPinnedCol   string
+	dataSelectedRow int
+	dataSelectedCol int
+	dataPageSize    int
+	dataLoadingMore bool
+	dataEOF         bool
 }
 
 func Run(opts Options) error {
@@ -288,17 +304,39 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.status = msg.title
-		if msg.dataMode {
+		m.dataFocus = false
+		m.detail.SetContent(msg.text)
+		return m, nil
+	case dataPageMsg:
+		m.busy = false
+		m.dataLoadingMore = false
+		if msg.err != nil {
+			m.status = msg.err.Error()
+			return m, nil
+		}
+		if msg.schema != m.effectiveSchema() || msg.table != m.selectedTable {
+			return m, nil
+		}
+		m.schemaIndex = m.indexOfSchemaAction("Data")
+		m.dataPageSize = msg.pageSize
+		m.dataEOF = len(msg.rows) < msg.pageSize
+		if msg.offset == 0 {
 			m.dataColumns = append([]string(nil), msg.columns...)
 			m.dataRows = append([][]string(nil), msg.rows...)
 			m.dataRowOffset = 0
 			m.dataColOffset = 0
-			m.dataFocus = false
-			m.detail.SetContent("")
-			return m, nil
+			m.dataSelectedRow = 0
+			m.dataSelectedCol = 0
+		} else {
+			m.dataRows = append(m.dataRows, msg.rows...)
 		}
-		m.dataFocus = false
-		m.detail.SetContent(msg.text)
+		m.normalizeDataState()
+		m.dataFocus = true
+		m.detail.SetContent("")
+		m.status = msg.title
+		if msg.offset == 0 {
+			m.status += " | arrows move, f pin, esc back"
+		}
 		return m, nil
 	case queryMsg:
 		m.busy = false
@@ -471,45 +509,85 @@ func (m *model) handleSchemaKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	if m.dataFocus && m.isDataAction() {
+	if m.showingDataPreview() {
 		switch msg.String() {
 		case "up", "k":
-			if m.dataRowOffset > 0 {
-				m.dataRowOffset--
+			m.dataFocus = true
+			if m.dataSelectedRow > 0 {
+				m.dataSelectedRow--
 			}
+			m.ensureDataSelectionVisible()
+			m.status = m.dataStatus()
 			return m, nil
 		case "down", "j":
-			if m.dataRowOffset < m.maxDataRowOffset() {
-				m.dataRowOffset++
+			m.dataFocus = true
+			if m.dataSelectedRow < len(m.dataRows)-1 {
+				m.dataSelectedRow++
 			}
+			m.ensureDataSelectionVisible()
+			if cmd := m.maybeLoadMoreData(); cmd != nil {
+				m.status = "Loading more rows..."
+				return m, cmd
+			}
+			m.status = m.dataStatus()
 			return m, nil
 		case "pgup":
-			m.dataRowOffset = max(0, m.dataRowOffset-m.dataRowCapacity())
+			m.dataFocus = true
+			m.dataSelectedRow = max(0, m.dataSelectedRow-m.dataRowCapacity())
+			m.ensureDataSelectionVisible()
+			m.status = m.dataStatus()
 			return m, nil
 		case "pgdown":
-			m.dataRowOffset = min(m.maxDataRowOffset(), m.dataRowOffset+m.dataRowCapacity())
+			m.dataFocus = true
+			m.dataSelectedRow = min(max(0, len(m.dataRows)-1), m.dataSelectedRow+m.dataRowCapacity())
+			m.ensureDataSelectionVisible()
+			if cmd := m.maybeLoadMoreData(); cmd != nil {
+				m.status = "Loading more rows..."
+				return m, cmd
+			}
+			m.status = m.dataStatus()
 			return m, nil
 		case "left", "h":
-			if m.dataColOffset > 0 {
-				m.dataColOffset--
+			m.dataFocus = true
+			if m.dataSelectedCol > 0 {
+				m.dataSelectedCol--
 			}
+			m.ensureDataSelectionVisible()
+			m.status = m.dataStatus()
 			return m, nil
 		case "right", "l":
-			if m.dataColOffset < max(0, len(m.dataColumns)-1) {
-				m.dataColOffset++
+			m.dataFocus = true
+			if m.dataSelectedCol < len(m.dataColumns)-1 {
+				m.dataSelectedCol++
 			}
+			m.ensureDataSelectionVisible()
+			m.status = m.dataStatus()
 			return m, nil
 		case "home", "g":
-			m.dataRowOffset = 0
-			m.dataColOffset = 0
+			m.dataFocus = true
+			m.dataSelectedRow = 0
+			m.dataSelectedCol = 0
+			m.ensureDataSelectionVisible()
+			m.status = m.dataStatus()
 			return m, nil
 		case "end", "G":
-			m.dataRowOffset = m.maxDataRowOffset()
+			m.dataFocus = true
+			if len(m.dataRows) > 0 {
+				m.dataSelectedRow = len(m.dataRows) - 1
+			}
+			m.ensureDataSelectionVisible()
+			if cmd := m.maybeLoadMoreData(); cmd != nil {
+				m.status = "Loading more rows..."
+				return m, cmd
+			}
+			m.status = m.dataStatus()
 			return m, nil
 		case "tab", "esc":
-			m.dataFocus = false
-			m.status = "Schema actions"
-			return m, nil
+			if m.dataFocus {
+				m.dataFocus = false
+				m.status = "Schema actions"
+				return m, nil
+			}
 		}
 	}
 
@@ -563,7 +641,7 @@ func (m *model) handleSchemaKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.isTableListAction() && len(m.schemaTableNames) > 0 {
 			m.schemaTableFocus = true
 			m.status = "Choose table in the right panel"
-		} else if m.isDataAction() && m.hasDataPreview() {
+		} else if m.showingDataPreview() {
 			m.dataFocus = true
 			m.status = "Data grid focus"
 		}
@@ -575,23 +653,29 @@ func (m *model) handleSchemaKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.status = "Table study cleared"
 		}
 	case "f":
-		if !m.isDataAction() {
+		if !m.showingDataPreview() {
 			break
 		}
-		_, pinned := parseDataArgs(m.schemaArg.Value(), 50)
-		if pinned == "" {
-			if m.dataPinnedCol == "" {
-				m.status = "Set column name in Argument, for example: 50 match_id"
-			} else {
-				m.dataPinnedCol = ""
-				m.status = "Pinned column cleared"
-			}
+		if len(m.dataColumns) == 0 {
+			m.status = "Load data first"
 			return m, nil
 		}
-		m.dataPinnedCol = pinned
-		m.status = "Pinned column: " + pinned
+		column := m.dataColumns[m.dataSelectedCol]
+		if strings.EqualFold(m.dataPinnedCol, column) {
+			m.dataPinnedCol = ""
+			m.status = "Pinned column cleared"
+			return m, nil
+		}
+		m.dataPinnedCol = column
+		m.ensureDataSelectionVisible()
+		m.status = "Pinned column: " + column
 		return m, nil
 	case "enter":
+		if m.showingDataPreview() {
+			m.dataFocus = true
+			m.status = m.dataStatus()
+			return m, nil
+		}
 		return m.runSchemaAction()
 	}
 
@@ -811,11 +895,12 @@ func (m *model) runSchemaAction() (tea.Model, tea.Cmd) {
 			m.busy = false
 			return m, nil
 		}
-		limit, pinned := parseDataArgs(arg, 50)
+		limit, pinned := parseDataArgs(arg, 100)
 		if pinned != "" {
 			m.dataPinnedCol = pinned
 		}
-		return m, runDataPreviewCmd(m.opts, name, m.effectiveSchema(), m.selectedTable, limit)
+		m.dataPageSize = max(100, limit)
+		return m, runDataPreviewCmd(m.opts, name, m.effectiveSchema(), m.selectedTable, m.dataPageSize)
 	case "Indexes":
 		return m, runSchemaCmd(m.opts, name, m.effectiveSchema(), "Indexes", db.IndexesSQL(arg != ""), anyOrNone(arg)...)
 	case "Users":
@@ -880,6 +965,12 @@ func (m *model) clearDataPreview() {
 	m.dataRowOffset = 0
 	m.dataColOffset = 0
 	m.dataFocus = false
+	m.dataPinnedCol = ""
+	m.dataSelectedRow = 0
+	m.dataSelectedCol = 0
+	m.dataPageSize = 0
+	m.dataLoadingMore = false
+	m.dataEOF = false
 }
 
 func (m model) hasDataPreview() bool {
@@ -915,6 +1006,10 @@ func (m *model) isDataAction() bool {
 		return false
 	}
 	return actions[m.schemaIndex] == "Data"
+}
+
+func (m *model) showingDataPreview() bool {
+	return m.hasDataPreview() && (m.dataFocus || m.isDataAction())
 }
 
 func (m *model) schemaTableDisplayLines(width int) ([]string, int) {
@@ -986,6 +1081,7 @@ func (m model) viewDataGrid(width int, height int) string {
 		return "Press Enter to load data preview"
 	}
 
+	m.normalizeDataState()
 	rowOffset := min(m.dataRowOffset, m.maxDataRowOffset())
 	rowCapacity := m.dataRowCapacity()
 	endRow := min(len(m.dataRows), rowOffset+rowCapacity)
@@ -998,18 +1094,18 @@ func (m model) viewDataGrid(width int, height int) string {
 
 	headerCells := make([]string, 0, len(columnIndexes))
 	for i, columnIndex := range columnIndexes {
-		headerCells = append(headerCells, padRight(shorten(m.dataColumns[columnIndex], columnWidths[i]), columnWidths[i]))
+		selectedColumn := columnIndex == m.dataSelectedCol
+		pinnedColumn := columnIndex == pinnedIndex
+		headerCells = append(headerCells, m.renderDataCell(m.dataColumns[columnIndex], columnWidths[i], false, selectedColumn, pinnedColumn))
 	}
 
 	lines := []string{
 		fmt.Sprintf(
-			"rows %d-%d/%d  cols %d-%d/%d  pin:%s  %s",
+			"rows %d-%d/%d loaded  col:%s  pin:%s  %s",
 			min(len(m.dataRows), rowOffset+1),
 			endRow,
 			len(m.dataRows),
-			columnIndexes[0]+1,
-			columnIndexes[len(columnIndexes)-1]+1,
-			len(m.dataColumns),
+			displayOr(m.selectedDataColumnName(), "-"),
 			displayOr(m.activePinnedColumnName(), "-"),
 			m.dataFocusHelp(),
 		),
@@ -1024,9 +1120,16 @@ func (m model) viewDataGrid(width int, height int) string {
 			if columnIndex < len(m.dataRows[rowIndex]) {
 				value = m.dataRows[rowIndex][columnIndex]
 			}
-			rowCells = append(rowCells, padRight(shorten(value, columnWidths[i]), columnWidths[i]))
+			selectedRow := rowIndex == m.dataSelectedRow
+			selectedColumn := columnIndex == m.dataSelectedCol
+			pinnedColumn := columnIndex == pinnedIndex
+			rowCells = append(rowCells, m.renderDataCell(value, columnWidths[i], selectedRow, selectedColumn, pinnedColumn))
 		}
-		lines = append(lines, buildDataLine(strconv.Itoa(rowIndex+1), rowLabelWidth, rowCells))
+		rowLabel := padLeft(strconv.Itoa(rowIndex+1), rowLabelWidth)
+		if rowIndex == m.dataSelectedRow {
+			rowLabel = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("62")).Render(rowLabel)
+		}
+		lines = append(lines, buildDataLine(rowLabel, rowLabelWidth, rowCells))
 	}
 
 	if len(m.dataRows) == 0 {
@@ -1042,9 +1145,9 @@ func (m model) viewDataGrid(width int, height int) string {
 
 func (m model) dataFocusHelp() string {
 	if m.dataFocus {
-		return "arrows scroll, f pin-from-arg, tab back"
+		return "arrows move, f pin selected col, tab back"
 	}
-	return "right/tab focus data, f pin-from-arg"
+	return "right/tab focus data"
 }
 
 func (m model) dataRowCapacity() int {
@@ -1101,6 +1204,111 @@ func (m model) dataColumnWidth(index int) int {
 		width = max(width, runeLen(row[index]))
 	}
 	return min(width, 24)
+}
+
+func (m *model) normalizeDataState() {
+	if len(m.dataColumns) == 0 {
+		m.dataSelectedCol = 0
+		m.dataColOffset = 0
+	} else {
+		m.dataSelectedCol = min(max(0, m.dataSelectedCol), len(m.dataColumns)-1)
+	}
+	if len(m.dataRows) == 0 {
+		m.dataSelectedRow = 0
+		m.dataRowOffset = 0
+	} else {
+		m.dataSelectedRow = min(max(0, m.dataSelectedRow), len(m.dataRows)-1)
+	}
+	m.ensureDataSelectionVisible()
+}
+
+func (m *model) ensureDataSelectionVisible() {
+	if len(m.dataRows) > 0 {
+		if m.dataSelectedRow < m.dataRowOffset {
+			m.dataRowOffset = m.dataSelectedRow
+		}
+		if m.dataSelectedRow >= m.dataRowOffset+m.dataRowCapacity() {
+			m.dataRowOffset = m.dataSelectedRow - m.dataRowCapacity() + 1
+		}
+		m.dataRowOffset = min(max(0, m.dataRowOffset), m.maxDataRowOffset())
+	}
+	if len(m.dataColumns) == 0 {
+		m.dataColOffset = 0
+		return
+	}
+	pinnedIndex := m.pinnedDataColumnIndex()
+	if m.dataSelectedCol == pinnedIndex {
+		return
+	}
+	if m.dataSelectedCol < m.dataColOffset {
+		m.dataColOffset = m.dataSelectedCol
+	}
+	gridWidth := m.dataGridWidth()
+	for attempts := 0; attempts < len(m.dataColumns); attempts++ {
+		visible, _ := m.visibleDataColumns(gridWidth, max(3, len(strconv.Itoa(max(1, len(m.dataRows))))), pinnedIndex)
+		if containsInt(visible, m.dataSelectedCol) {
+			return
+		}
+		if m.dataSelectedCol > m.dataColOffset {
+			m.dataColOffset++
+			continue
+		}
+		m.dataColOffset = max(0, m.dataSelectedCol)
+	}
+}
+
+func (m model) dataGridWidth() int {
+	_, rightWidth, _ := m.splitLayoutWidths(30, 40)
+	return rightWidth - 4
+}
+
+func (m *model) maybeLoadMoreData() tea.Cmd {
+	if m.dataLoadingMore || m.dataEOF || !m.hasDataPreview() {
+		return nil
+	}
+	if m.dataSelectedRow < len(m.dataRows)-1 {
+		return nil
+	}
+	m.dataLoadingMore = true
+	return loadMoreDataCmd(m.opts, m.effectiveConnection(), m.effectiveSchema(), m.selectedTable, len(m.dataRows), max(100, m.dataPageSize))
+}
+
+func (m model) selectedDataColumnName() string {
+	if m.dataSelectedCol < 0 || m.dataSelectedCol >= len(m.dataColumns) {
+		return ""
+	}
+	return m.dataColumns[m.dataSelectedCol]
+}
+
+func (m model) dataStatus() string {
+	if !m.hasDataPreview() {
+		return "Data preview"
+	}
+	row := 0
+	if len(m.dataRows) > 0 {
+		row = m.dataSelectedRow + 1
+	}
+	status := fmt.Sprintf("Data row %d/%d col %s", row, len(m.dataRows), displayOr(m.selectedDataColumnName(), "-"))
+	if m.dataLoadingMore {
+		status += " | loading more rows..."
+	}
+	return status
+}
+
+func (m model) renderDataCell(value string, width int, selectedRow bool, selectedColumn bool, pinnedColumn bool) string {
+	content := padRight(shorten(value, width), width)
+	style := lipgloss.NewStyle()
+	switch {
+	case selectedRow && selectedColumn:
+		style = style.Bold(true).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("62"))
+	case selectedColumn:
+		style = style.Bold(true).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("60"))
+	case selectedRow:
+		style = style.Foreground(lipgloss.Color("230")).Background(lipgloss.Color("238"))
+	case pinnedColumn:
+		style = style.Foreground(lipgloss.Color("151"))
+	}
+	return style.Render(content)
 }
 
 func (m model) pinnedDataColumnIndex() int {
@@ -1340,7 +1548,7 @@ func (m model) viewSchema() string {
 	} else {
 		left = append(left, "Studying", "-")
 	}
-	if m.isDataAction() {
+	if m.showingDataPreview() {
 		left = append(left, "", "Pinned", shorten(displayOr(m.dataPinnedCol, "-"), leftWidth-4))
 	}
 	left = append(left, "", "Argument", m.schemaArg.View())
@@ -1348,7 +1556,7 @@ func (m model) viewSchema() string {
 	rightTitle := "Result"
 	if m.isTableListAction() {
 		rightTitle = "Tables by schema"
-	} else if m.isDataAction() {
+	} else if m.showingDataPreview() {
 		rightTitle = "Data preview"
 		if m.hasDataPreview() {
 			rightTitle = m.status
@@ -1363,7 +1571,7 @@ func (m model) viewSchema() string {
 	rightContent := clampBlock(m.detail.View(), rightWidth-4)
 	if m.isTableListAction() {
 		rightContent = m.viewSchemaTablesList(rightWidth-4, bodyHeight-4)
-	} else if m.isDataAction() {
+	} else if m.showingDataPreview() {
 		rightContent = m.viewDataGrid(rightWidth-4, bodyHeight-4)
 	}
 	rightPane := rightStyle.Render(rightTitle + "\n\n" + rightContent)
@@ -1411,7 +1619,7 @@ func (m model) viewFooter() string {
 	case tabConnections:
 		help = "enter select  u default  t test  n new  e edit  d delete  s schema"
 	case tabSchema:
-		help = "enter load/run  right/tab focus pane  arrows scroll data  f pin column  a edit arg  s schema  x clear table"
+		help = "enter load/run  arrows move data  f pin selected column  tab/esc back  a edit arg  s schema  x clear table"
 	case tabQuery:
 		help = "ctrl+e run  ctrl+k clear  s schema"
 	case tabExec:
@@ -1588,19 +1796,45 @@ func runDataPreviewCmd(opts Options, name string, schema string, table string, l
 	return func() tea.Msg {
 		session, err := openSession(opts, name, schema)
 		if err != nil {
-			return schemaMsg{title: "Data " + table, err: err}
+			return dataPageMsg{title: "Data " + table, schema: schema, table: table, pageSize: limit, err: err}
 		}
 		defer session.Conn.Close(context.Background())
 
-		columns, rows, _, err := db.Query(context.Background(), session.Conn, db.BuildPreviewSQL(schema, table, limit))
+		columns, rows, _, err := db.Query(context.Background(), session.Conn, db.BuildPreviewSQL(schema, table, limit, 0))
 		if err != nil {
-			return schemaMsg{title: "Data " + table, err: err}
+			return dataPageMsg{title: "Data " + table, schema: schema, table: table, pageSize: limit, err: err}
 		}
-		return schemaMsg{
-			title:    fmt.Sprintf("Data %s (limit %d)", table, limit),
+		return dataPageMsg{
+			title:    fmt.Sprintf("Data %s (%d rows loaded)", table, len(rows)),
+			schema:   schema,
+			table:    table,
 			columns:  columns,
 			rows:     rows,
-			dataMode: true,
+			pageSize: limit,
+		}
+	}
+}
+
+func loadMoreDataCmd(opts Options, name string, schema string, table string, offset int, limit int) tea.Cmd {
+	return func() tea.Msg {
+		session, err := openSession(opts, name, schema)
+		if err != nil {
+			return dataPageMsg{title: "Data " + table, schema: schema, table: table, offset: offset, pageSize: limit, err: err}
+		}
+		defer session.Conn.Close(context.Background())
+
+		columns, rows, _, err := db.Query(context.Background(), session.Conn, db.BuildPreviewSQL(schema, table, limit, offset))
+		if err != nil {
+			return dataPageMsg{title: "Data " + table, schema: schema, table: table, offset: offset, pageSize: limit, err: err}
+		}
+		return dataPageMsg{
+			title:    fmt.Sprintf("Data %s (%d rows loaded)", table, offset+len(rows)),
+			schema:   schema,
+			table:    table,
+			columns:  columns,
+			rows:     rows,
+			offset:   offset,
+			pageSize: limit,
 		}
 	}
 }
@@ -1958,8 +2192,9 @@ func clampBlock(text string, width int) string {
 }
 
 func buildDataLine(rowLabel string, rowLabelWidth int, cells []string) string {
+	_ = rowLabelWidth
 	parts := make([]string, 0, len(cells)+1)
-	parts = append(parts, padLeft(shorten(rowLabel, rowLabelWidth), rowLabelWidth))
+	parts = append(parts, rowLabel)
 	parts = append(parts, cells...)
 	return strings.Join(parts, " | ")
 }
@@ -1971,6 +2206,15 @@ func buildDataSeparator(rowLabelWidth int, widths []int) string {
 		parts = append(parts, strings.Repeat("-", width))
 	}
 	return strings.Join(parts, "-+-")
+}
+
+func containsInt(values []int, target int) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func padLeft(value string, width int) string {

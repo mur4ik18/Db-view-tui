@@ -66,11 +66,11 @@ func init() {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			return runSchemaDynamic(func() string {
-				return db.BuildPreviewSQL(globalSchema, args[0], dataLimit)
+				return db.BuildPreviewSQL(globalSchema, args[0], dataLimit, 0)
 			})
 		},
 	}
-	dataCmd.Flags().IntVar(&dataLimit, "limit", 50, "preview row limit")
+	dataCmd.Flags().IntVar(&dataLimit, "limit", 100, "preview row limit")
 
 	usersCmd := &cobra.Command{
 		Use:   "users",

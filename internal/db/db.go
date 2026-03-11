@@ -218,18 +218,22 @@ func QuoteIdentifier(value string) string {
 	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
 }
 
-func BuildPreviewSQL(schema string, table string, limit int) string {
+func BuildPreviewSQL(schema string, table string, limit int, offset int) string {
 	if limit <= 0 {
-		limit = 50
+		limit = 100
 	}
 	if schema == "" {
 		schema = "public"
 	}
+	if offset < 0 {
+		offset = 0
+	}
 
 	return fmt.Sprintf(
-		"SELECT * FROM %s.%s LIMIT %d;",
+		"SELECT * FROM %s.%s OFFSET %d LIMIT %d;",
 		QuoteIdentifier(schema),
 		QuoteIdentifier(table),
+		offset,
 		limit,
 	)
 }
