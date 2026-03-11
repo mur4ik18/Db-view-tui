@@ -187,7 +187,7 @@ func Run(opts Options) error {
 
 func newModel(opts Options) model {
 	schemaArg := textinput.New()
-	schemaArg.Placeholder = "limit search -exclude"
+	schemaArg.Placeholder = "search -exclude limit=100"
 	schemaArg.CharLimit = 256
 	schemaArg.Width = 24
 
@@ -2773,7 +2773,19 @@ func parseDataArgs(value string, fallback int) (int, string, []string) {
 	filterParts := make([]string, 0, len(parts))
 	excludeParts := make([]string, 0, len(parts))
 	for _, part := range parts {
-		if number, err := strconv.Atoi(part); err == nil {
+		if rawLimit, ok := strings.CutPrefix(strings.ToLower(part), "limit="); ok {
+			if number, err := strconv.Atoi(rawLimit); err == nil {
+				limit = number
+				continue
+			}
+		}
+		if rawLimit, ok := strings.CutPrefix(strings.ToLower(part), "l="); ok {
+			if number, err := strconv.Atoi(rawLimit); err == nil {
+				limit = number
+				continue
+			}
+		}
+		if number, err := strconv.Atoi(part); err == nil && len(parts) > 1 && len(filterParts) == 0 && len(excludeParts) == 0 {
 			limit = number
 			continue
 		}

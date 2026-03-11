@@ -159,7 +159,9 @@ Filtering syntax in `Argument`:
 - `le mans` include rows that contain `le mans`
 - `-(women)` exclude rows that contain `(women)`
 - `le mans -(women)` include and exclude in the same column
-- `100 le mans -(women)` same filter with a larger page size
+- `12345` search for a numeric value
+- `limit=100 le mans -(women)` same filter with a larger page size
+- `l=100 le mans` short form for page size
 
 Filters are stored per selected column, so you can add one filter on `city`, another on `country`, and they will all be applied together.
 
