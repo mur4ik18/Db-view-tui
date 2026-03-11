@@ -263,7 +263,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleSchemaKeys(msg)
 		}
 		switch msg.String() {
-		case "ctrl+c", "q":
+		case "ctrl+c", "ctrl+d":
 			return m, tea.Quit
 		case "s":
 			m.schemaSwitchOpen = true
@@ -528,7 +528,7 @@ func (m *model) handleSchemaKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
-	if m.showingDataPreview() {
+	if m.dataFocus && m.showingDataPreview() {
 		switch msg.String() {
 		case "up", "k":
 			m.dataFocus = true
@@ -601,7 +601,7 @@ func (m *model) handleSchemaKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.status = m.dataStatus()
 			return m, nil
-		case "tab", "esc":
+		case "tab", "esc", "q":
 			if m.dataFocus {
 				m.dataFocus = false
 				m.status = "Schema actions"
@@ -636,7 +636,7 @@ func (m *model) handleSchemaKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.schemaIndex = m.indexOfSchemaAction("Columns")
 			m.busy = true
 			return m, runSchemaCmd(m.opts, m.effectiveConnection(), m.effectiveSchema(), "Columns "+m.selectedTable, db.ColumnConstraintsSQL(), m.selectedTable)
-		case "tab", "left", "h", "esc":
+		case "tab", "left", "h", "esc", "q":
 			m.schemaTableFocus = false
 			m.status = "Schema actions"
 			return m, nil
@@ -810,7 +810,7 @@ func (m *model) handleExecKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.focusExec()
 		return m, nil
-	case "ctrl+d":
+	case "ctrl+r":
 		m.execDryRun = !m.execDryRun
 		return m, nil
 	case "ctrl+t":
@@ -904,7 +904,7 @@ func (m *model) handleSchemaSwitchKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m *model) handleDataInspectKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "esc", "enter", "v":
+	case "esc", "enter", "v", "q":
 		m.dataInspectOpen = false
 		m.status = m.dataStatus()
 		return m, nil
@@ -1942,14 +1942,14 @@ func (m model) viewFooter() string {
 	case tabConnections:
 		help = "enter select  u default  t test  n new  e edit  d delete  s schema"
 	case tabSchema:
-		help = "enter load/run  arrows move data  v details  o sort  a search  d drop-filter  f pin  r reset  tab/esc back  s schema  x clear table"
+		help = "enter load/run  arrows move data  v details  o sort  a search  d drop-filter  f pin  r reset  tab/esc/q back  s schema  x clear table"
 	case tabQuery:
 		help = "ctrl+e run  ctrl+k clear  s schema"
 	case tabExec:
-		help = "tab switch field  ctrl+e run  ctrl+d dry-run  ctrl+t tx  ctrl+g continue  s schema"
+		help = "tab switch field  ctrl+e run  ctrl+r dry-run  ctrl+t tx  ctrl+g continue  s schema"
 	}
 
-	return lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render(status + "   |   " + help + "   |   q quit")
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render(status + "   |   " + help + "   |   ctrl+d/ctrl+c quit")
 }
 
 func (m model) viewForm() string {
