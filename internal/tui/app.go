@@ -9,6 +9,7 @@ import (
 	"dbctl/internal/sqlrun"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,9 +42,12 @@ type connTestMsg struct {
 }
 
 type schemaMsg struct {
-	title string
-	text  string
-	err   error
+	title    string
+	text     string
+	err      error
+	columns  []string
+	rows     [][]string
+	dataMode bool
 }
 
 type queryMsg struct {
@@ -127,6 +131,13 @@ type model struct {
 	schemaTableNames      []string
 	schemaTableIndex      int
 	schemaTableFocus      bool
+
+	dataColumns   []string
+	dataRows      [][]string
+	dataRowOffset int
+	dataColOffset int
+	dataFocus     bool
+	dataPinnedCol string
 }
 
 func Run(opts Options) error {
@@ -277,6 +288,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.status = msg.title
+		if msg.dataMode {
+			m.dataColumns = append([]string(nil), msg.columns...)
+			m.dataRows = append([][]string(nil), msg.rows...)
+			m.dataRowOffset = 0
+			m.dataColOffset = 0
+			m.dataFocus = false
+			m.detail.SetContent("")
+			return m, nil
+		}
+		m.dataFocus = false
 		m.detail.SetContent(msg.text)
 		return m, nil
 	case queryMsg:
@@ -450,6 +471,48 @@ func (m *model) handleSchemaKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	if m.dataFocus && m.isDataAction() {
+		switch msg.String() {
+		case "up", "k":
+			if m.dataRowOffset > 0 {
+				m.dataRowOffset--
+			}
+			return m, nil
+		case "down", "j":
+			if m.dataRowOffset < m.maxDataRowOffset() {
+				m.dataRowOffset++
+			}
+			return m, nil
+		case "pgup":
+			m.dataRowOffset = max(0, m.dataRowOffset-m.dataRowCapacity())
+			return m, nil
+		case "pgdown":
+			m.dataRowOffset = min(m.maxDataRowOffset(), m.dataRowOffset+m.dataRowCapacity())
+			return m, nil
+		case "left", "h":
+			if m.dataColOffset > 0 {
+				m.dataColOffset--
+			}
+			return m, nil
+		case "right", "l":
+			if m.dataColOffset < max(0, len(m.dataColumns)-1) {
+				m.dataColOffset++
+			}
+			return m, nil
+		case "home", "g":
+			m.dataRowOffset = 0
+			m.dataColOffset = 0
+			return m, nil
+		case "end", "G":
+			m.dataRowOffset = m.maxDataRowOffset()
+			return m, nil
+		case "tab", "esc":
+			m.dataFocus = false
+			m.status = "Schema actions"
+			return m, nil
+		}
+	}
+
 	if m.schemaTableFocus && m.isTableListAction() {
 		switch msg.String() {
 		case "up", "k":
@@ -470,6 +533,7 @@ func (m *model) handleSchemaKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			schema, table := splitQualifiedTable(m.schemaTableNames[m.schemaTableIndex])
 			m.currentSchema = defaultString(schema, m.currentSchema)
 			m.selectedTable = table
+			m.clearDataPreview()
 			m.schemaTableFocus = false
 			m.status = "Columns " + schema + "." + table
 			m.schemaIndex = m.indexOfSchemaAction("Columns")
@@ -499,13 +563,34 @@ func (m *model) handleSchemaKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.isTableListAction() && len(m.schemaTableNames) > 0 {
 			m.schemaTableFocus = true
 			m.status = "Choose table in the right panel"
+		} else if m.isDataAction() && m.hasDataPreview() {
+			m.dataFocus = true
+			m.status = "Data grid focus"
 		}
 	case "x":
 		if m.selectedTable != "" {
 			m.selectedTable = ""
+			m.clearDataPreview()
 			m.schemaIndex = 0
 			m.status = "Table study cleared"
 		}
+	case "f":
+		if !m.isDataAction() {
+			break
+		}
+		_, pinned := parseDataArgs(m.schemaArg.Value(), 50)
+		if pinned == "" {
+			if m.dataPinnedCol == "" {
+				m.status = "Set column name in Argument, for example: 50 match_id"
+			} else {
+				m.dataPinnedCol = ""
+				m.status = "Pinned column cleared"
+			}
+			return m, nil
+		}
+		m.dataPinnedCol = pinned
+		m.status = "Pinned column: " + pinned
+		return m, nil
 	case "enter":
 		return m.runSchemaAction()
 	}
@@ -726,7 +811,10 @@ func (m *model) runSchemaAction() (tea.Model, tea.Cmd) {
 			m.busy = false
 			return m, nil
 		}
-		_, limit := parseTableAndLimit(arg, 50)
+		limit, pinned := parseDataArgs(arg, 50)
+		if pinned != "" {
+			m.dataPinnedCol = pinned
+		}
 		return m, runDataPreviewCmd(m.opts, name, m.effectiveSchema(), m.selectedTable, limit)
 	case "Indexes":
 		return m, runSchemaCmd(m.opts, name, m.effectiveSchema(), "Indexes", db.IndexesSQL(arg != ""), anyOrNone(arg)...)
@@ -786,6 +874,18 @@ func (m *model) visibleSchemaActions() []string {
 	return actions
 }
 
+func (m *model) clearDataPreview() {
+	m.dataColumns = nil
+	m.dataRows = nil
+	m.dataRowOffset = 0
+	m.dataColOffset = 0
+	m.dataFocus = false
+}
+
+func (m model) hasDataPreview() bool {
+	return len(m.dataColumns) > 0
+}
+
 func (m *model) filteredSchemaTables() []string {
 	filter := strings.ToLower(strings.TrimSpace(m.schemaTableFilter.Value()))
 	if filter == "" {
@@ -807,6 +907,14 @@ func (m *model) isTableListAction() bool {
 		return false
 	}
 	return actions[m.schemaIndex] == "Tables"
+}
+
+func (m *model) isDataAction() bool {
+	actions := m.visibleSchemaActions()
+	if len(actions) == 0 || m.schemaIndex >= len(actions) {
+		return false
+	}
+	return actions[m.schemaIndex] == "Data"
 }
 
 func (m *model) schemaTableDisplayLines(width int) ([]string, int) {
@@ -871,6 +979,148 @@ func (m *model) viewSchemaTablesList(width int, height int) string {
 	}
 
 	return strings.Join(visible, "\n")
+}
+
+func (m model) viewDataGrid(width int, height int) string {
+	if !m.hasDataPreview() {
+		return "Press Enter to load data preview"
+	}
+
+	rowOffset := min(m.dataRowOffset, m.maxDataRowOffset())
+	rowCapacity := m.dataRowCapacity()
+	endRow := min(len(m.dataRows), rowOffset+rowCapacity)
+	rowLabelWidth := max(3, len(strconv.Itoa(max(1, len(m.dataRows)))))
+	pinnedIndex := m.pinnedDataColumnIndex()
+	columnIndexes, columnWidths := m.visibleDataColumns(width, rowLabelWidth, pinnedIndex)
+	if len(columnIndexes) == 0 {
+		return "Terminal is too narrow for data preview"
+	}
+
+	headerCells := make([]string, 0, len(columnIndexes))
+	for i, columnIndex := range columnIndexes {
+		headerCells = append(headerCells, padRight(shorten(m.dataColumns[columnIndex], columnWidths[i]), columnWidths[i]))
+	}
+
+	lines := []string{
+		fmt.Sprintf(
+			"rows %d-%d/%d  cols %d-%d/%d  pin:%s  %s",
+			min(len(m.dataRows), rowOffset+1),
+			endRow,
+			len(m.dataRows),
+			columnIndexes[0]+1,
+			columnIndexes[len(columnIndexes)-1]+1,
+			len(m.dataColumns),
+			displayOr(m.activePinnedColumnName(), "-"),
+			m.dataFocusHelp(),
+		),
+		buildDataLine("#", rowLabelWidth, headerCells),
+		buildDataSeparator(rowLabelWidth, columnWidths),
+	}
+
+	for rowIndex := rowOffset; rowIndex < endRow; rowIndex++ {
+		rowCells := make([]string, 0, len(columnIndexes))
+		for i, columnIndex := range columnIndexes {
+			value := ""
+			if columnIndex < len(m.dataRows[rowIndex]) {
+				value = m.dataRows[rowIndex][columnIndex]
+			}
+			rowCells = append(rowCells, padRight(shorten(value, columnWidths[i]), columnWidths[i]))
+		}
+		lines = append(lines, buildDataLine(strconv.Itoa(rowIndex+1), rowLabelWidth, rowCells))
+	}
+
+	if len(m.dataRows) == 0 {
+		lines = append(lines, "(no rows)")
+	}
+
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+func (m model) dataFocusHelp() string {
+	if m.dataFocus {
+		return "arrows scroll, f pin-from-arg, tab back"
+	}
+	return "right/tab focus data, f pin-from-arg"
+}
+
+func (m model) dataRowCapacity() int {
+	return max(1, m.bodyHeight()-7)
+}
+
+func (m model) maxDataRowOffset() int {
+	return max(0, len(m.dataRows)-m.dataRowCapacity())
+}
+
+func (m model) visibleDataColumns(width int, rowLabelWidth int, pinnedIndex int) ([]int, []int) {
+	available := max(8, width-rowLabelWidth-3)
+	indexes := make([]int, 0)
+	widths := make([]int, 0)
+	used := 0
+
+	if pinnedIndex >= 0 && pinnedIndex < len(m.dataColumns) {
+		pinnedWidth := m.dataColumnWidth(pinnedIndex)
+		indexes = append(indexes, pinnedIndex)
+		widths = append(widths, pinnedWidth)
+		used += pinnedWidth
+	}
+
+	for i := m.dataColOffset; i < len(m.dataColumns); i++ {
+		if i == pinnedIndex {
+			continue
+		}
+		columnWidth := m.dataColumnWidth(i)
+		extra := columnWidth
+		if len(indexes) > 0 {
+			extra += 3
+		}
+		if used+extra > available {
+			if len(indexes) == 0 {
+				indexes = append(indexes, i)
+				widths = append(widths, max(4, available))
+			}
+			break
+		}
+		indexes = append(indexes, i)
+		widths = append(widths, columnWidth)
+		used += extra
+	}
+
+	return indexes, widths
+}
+
+func (m model) dataColumnWidth(index int) int {
+	width := max(4, runeLen(m.dataColumns[index]))
+	for _, row := range m.dataRows {
+		if index >= len(row) {
+			continue
+		}
+		width = max(width, runeLen(row[index]))
+	}
+	return min(width, 24)
+}
+
+func (m model) pinnedDataColumnIndex() int {
+	if m.dataPinnedCol == "" {
+		return -1
+	}
+	for i, column := range m.dataColumns {
+		if column == m.dataPinnedCol || strings.EqualFold(column, m.dataPinnedCol) {
+			return i
+		}
+	}
+	return -1
+}
+
+func (m model) activePinnedColumnName() string {
+	index := m.pinnedDataColumnIndex()
+	if index < 0 || index >= len(m.dataColumns) {
+		return ""
+	}
+	return m.dataColumns[index]
 }
 
 func (m *model) refreshConnectionNames() {
@@ -1090,11 +1340,19 @@ func (m model) viewSchema() string {
 	} else {
 		left = append(left, "Studying", "-")
 	}
+	if m.isDataAction() {
+		left = append(left, "", "Pinned", shorten(displayOr(m.dataPinnedCol, "-"), leftWidth-4))
+	}
 	left = append(left, "", "Argument", m.schemaArg.View())
 
 	rightTitle := "Result"
 	if m.isTableListAction() {
 		rightTitle = "Tables by schema"
+	} else if m.isDataAction() {
+		rightTitle = "Data preview"
+		if m.hasDataPreview() {
+			rightTitle = m.status
+		}
 	} else if m.detail.View() != "" {
 		rightTitle = m.status
 	}
@@ -1105,6 +1363,8 @@ func (m model) viewSchema() string {
 	rightContent := clampBlock(m.detail.View(), rightWidth-4)
 	if m.isTableListAction() {
 		rightContent = m.viewSchemaTablesList(rightWidth-4, bodyHeight-4)
+	} else if m.isDataAction() {
+		rightContent = m.viewDataGrid(rightWidth-4, bodyHeight-4)
 	}
 	rightPane := rightStyle.Render(rightTitle + "\n\n" + rightContent)
 	if stacked {
@@ -1151,7 +1411,7 @@ func (m model) viewFooter() string {
 	case tabConnections:
 		help = "enter select  u default  t test  n new  e edit  d delete  s schema"
 	case tabSchema:
-		help = "enter load/run  right/tab focus tables  enter opens columns  a edit arg  s schema  x clear table"
+		help = "enter load/run  right/tab focus pane  arrows scroll data  f pin column  a edit arg  s schema  x clear table"
 	case tabQuery:
 		help = "ctrl+e run  ctrl+k clear  s schema"
 	case tabExec:
@@ -1336,7 +1596,12 @@ func runDataPreviewCmd(opts Options, name string, schema string, table string, l
 		if err != nil {
 			return schemaMsg{title: "Data " + table, err: err}
 		}
-		return schemaMsg{title: fmt.Sprintf("Data %s (limit %d)", table, limit), text: renderTable(columns, rows)}
+		return schemaMsg{
+			title:    fmt.Sprintf("Data %s (limit %d)", table, limit),
+			columns:  columns,
+			rows:     rows,
+			dataMode: true,
+		}
 	}
 }
 
@@ -1554,6 +1819,22 @@ func parseTableAndLimit(value string, fallback int) (string, int) {
 	return parts[0], parseInt(parts[1], fallback)
 }
 
+func parseDataArgs(value string, fallback int) (int, string) {
+	parts := strings.Fields(strings.TrimSpace(value))
+	limit := fallback
+	pinned := ""
+	for _, part := range parts {
+		if number, err := strconv.Atoi(part); err == nil {
+			limit = number
+			continue
+		}
+		if pinned == "" {
+			pinned = part
+		}
+	}
+	return limit, pinned
+}
+
 func splitQualifiedTable(value string) (string, string) {
 	left, right, ok := strings.Cut(value, ".")
 	if !ok {
@@ -1674,4 +1955,40 @@ func clampBlock(text string, width int) string {
 		out = append(out, shorten(line, width))
 	}
 	return strings.Join(out, "\n")
+}
+
+func buildDataLine(rowLabel string, rowLabelWidth int, cells []string) string {
+	parts := make([]string, 0, len(cells)+1)
+	parts = append(parts, padLeft(shorten(rowLabel, rowLabelWidth), rowLabelWidth))
+	parts = append(parts, cells...)
+	return strings.Join(parts, " | ")
+}
+
+func buildDataSeparator(rowLabelWidth int, widths []int) string {
+	parts := make([]string, 0, len(widths)+1)
+	parts = append(parts, strings.Repeat("-", rowLabelWidth))
+	for _, width := range widths {
+		parts = append(parts, strings.Repeat("-", width))
+	}
+	return strings.Join(parts, "-+-")
+}
+
+func padLeft(value string, width int) string {
+	padding := width - runeLen(value)
+	if padding <= 0 {
+		return value
+	}
+	return strings.Repeat(" ", padding) + value
+}
+
+func padRight(value string, width int) string {
+	padding := width - runeLen(value)
+	if padding <= 0 {
+		return value
+	}
+	return value + strings.Repeat(" ", padding)
+}
+
+func runeLen(value string) int {
+	return len([]rune(value))
 }
