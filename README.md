@@ -18,7 +18,14 @@ It combines connection management, schema browsing, table inspection, query exec
   - columns and constraints
   - table privileges
   - foreign keys
-  - data preview
+  - interactive data preview with:
+    - row and column navigation
+    - horizontal scrolling with pinned columns
+    - sorting by the selected column
+    - stacked filters across multiple columns
+    - include / exclude text search
+    - full cell and full row inspection
+    - saved presets per table
 - One-off SQL query runner
 - SQL file and directory execution with:
   - dry run
@@ -104,7 +111,7 @@ Open the `Schema` tab, select `Tables`, load the list, move focus to the right p
 
 ### Global Keys
 
-- `q` quit
+- `Ctrl+D` or `Ctrl+C` quit
 - `s` switch schema
 
 ### Connections
@@ -131,6 +138,40 @@ When a table is selected, table-specific actions become available:
 - `Data`
 - `FKeys`
 
+### Data View
+
+Inside `Schema -> Data`, the right pane becomes a table viewer.
+
+- `Up` / `Down` move between rows
+- `Left` / `Right` move between columns
+- `Tab`, `Esc`, or `q` return to `Schema Actions`
+- `f` pin the selected column so it stays visible while scrolling horizontally
+- `o` sort by the selected column, toggling `asc/desc`
+- `a` edit the filter for the selected column
+- `d` remove the filter for the selected column
+- `r` reset all filters and sorting
+- `v` open the full value + full row inspector
+- `w` save the current data view as a preset
+- `p` open saved presets for the current table
+
+Filtering syntax in `Argument`:
+
+- `le mans` include rows that contain `le mans`
+- `-(women)` exclude rows that contain `(women)`
+- `le mans -(women)` include and exclude in the same column
+- `100 le mans -(women)` same filter with a larger page size
+
+Filters are stored per selected column, so you can add one filter on `city`, another on `country`, and they will all be applied together.
+
+Saved presets remember:
+
+- active filters across columns
+- sorting
+- pinned column
+- page size
+
+Presets are scoped to the current `schema.table`.
+
 ### Query
 
 - `Ctrl+E` run query
@@ -140,7 +181,7 @@ When a table is selected, table-specific actions become available:
 
 - `Tab` switch fields
 - `Ctrl+E` execute
-- `Ctrl+D` toggle dry run
+- `Ctrl+R` toggle dry run
 - `Ctrl+T` toggle transaction
 - `Ctrl+G` toggle continue-on-error
 
@@ -202,6 +243,8 @@ Saved connections are stored in:
 ```text
 ~/.dbctl/config.yaml
 ```
+
+The same config file also stores saved `Data` presets for individual tables.
 
 History for the interactive shell is stored in:
 

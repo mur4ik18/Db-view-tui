@@ -20,9 +20,25 @@ type Connection struct {
 	URL      string `yaml:"url,omitempty"`
 }
 
+type DataPresetFilter struct {
+	Column   string   `yaml:"column"`
+	Include  string   `yaml:"include,omitempty"`
+	Excludes []string `yaml:"excludes,omitempty"`
+}
+
+type DataPreset struct {
+	Name         string             `yaml:"name"`
+	PageSize     int                `yaml:"page_size,omitempty"`
+	SortColumn   string             `yaml:"sort_column,omitempty"`
+	SortDesc     bool               `yaml:"sort_desc,omitempty"`
+	PinnedColumn string             `yaml:"pinned_column,omitempty"`
+	Filters      []DataPresetFilter `yaml:"filters,omitempty"`
+}
+
 type Config struct {
-	Connections map[string]Connection `yaml:"connections"`
-	Default     string                `yaml:"default,omitempty"`
+	Connections map[string]Connection   `yaml:"connections"`
+	Default     string                  `yaml:"default,omitempty"`
+	DataPresets map[string][]DataPreset `yaml:"data_presets,omitempty"`
 }
 
 func Dir() string {
@@ -52,6 +68,7 @@ func Load() (*Config, error) {
 
 	cfg := &Config{
 		Connections: map[string]Connection{},
+		DataPresets: map[string][]DataPreset{},
 	}
 
 	data, err := os.ReadFile(Path())
@@ -73,6 +90,9 @@ func Load() (*Config, error) {
 	if cfg.Connections == nil {
 		cfg.Connections = map[string]Connection{}
 	}
+	if cfg.DataPresets == nil {
+		cfg.DataPresets = map[string][]DataPreset{}
+	}
 
 	return cfg, nil
 }
@@ -84,6 +104,9 @@ func Save(cfg *Config) error {
 
 	if cfg.Connections == nil {
 		cfg.Connections = map[string]Connection{}
+	}
+	if cfg.DataPresets == nil {
+		cfg.DataPresets = map[string][]DataPreset{}
 	}
 
 	data, err := yaml.Marshal(cfg)

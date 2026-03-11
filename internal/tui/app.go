@@ -93,6 +93,18 @@ type dataPageMsg struct {
 	err      error
 }
 
+type dataPresetSaveMsg struct {
+	cfg  *config.Config
+	name string
+	err  error
+}
+
+type dataPresetDeleteMsg struct {
+	cfg  *config.Config
+	name string
+	err  error
+}
+
 type model struct {
 	opts Options
 
@@ -159,6 +171,11 @@ type model struct {
 	dataFilters     []db.PreviewFilter
 	dataInspect     viewport.Model
 	dataInspectOpen bool
+
+	dataPresetSaveOpen bool
+	dataPresetListOpen bool
+	dataPresetName     textinput.Model
+	dataPresetIndex    int
 }
 
 func Run(opts Options) error {
@@ -206,6 +223,11 @@ func newModel(opts Options) model {
 	schemaTableFilter.CharLimit = 256
 	schemaTableFilter.Width = 40
 
+	dataPresetName := textinput.New()
+	dataPresetName.Placeholder = "preset name"
+	dataPresetName.CharLimit = 128
+	dataPresetName.Width = 40
+
 	m := model{
 		opts: opts,
 		cfg: &config.Config{
@@ -223,6 +245,7 @@ func newModel(opts Options) model {
 		execResult:        viewport.New(0, 0),
 		detail:            viewport.New(0, 0),
 		dataInspect:       viewport.New(0, 0),
+		dataPresetName:    dataPresetName,
 		execFocus:         0,
 		execDryRun:        false,
 		execTransaction:   false,
@@ -258,6 +281,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.dataInspectOpen {
 			return m.handleDataInspectKeys(msg)
+		}
+		if m.dataPresetSaveOpen {
+			return m.handleDataPresetSaveKeys(msg)
+		}
+		if m.dataPresetListOpen {
+			return m.handleDataPresetListKeys(msg)
 		}
 		if m.activeTab == tabSchema && m.schemaArgEdit {
 			return m.handleSchemaKeys(msg)
@@ -353,6 +382,33 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.offset == 0 {
 			m.status += " | arrows move, f pin, esc back"
 		}
+		return m, nil
+	case dataPresetSaveMsg:
+		m.busy = false
+		if msg.err != nil {
+			m.status = msg.err.Error()
+			return m, nil
+		}
+		m.cfg = msg.cfg
+		m.dataPresetSaveOpen = false
+		m.dataPresetName.Blur()
+		m.status = "Saved preset: " + msg.name
+		return m, nil
+	case dataPresetDeleteMsg:
+		m.busy = false
+		if msg.err != nil {
+			m.status = msg.err.Error()
+			return m, nil
+		}
+		m.cfg = msg.cfg
+		presets := m.dataPresetsForSelectedTable()
+		if len(presets) == 0 {
+			m.dataPresetListOpen = false
+			m.dataPresetIndex = 0
+		} else if m.dataPresetIndex >= len(presets) {
+			m.dataPresetIndex = len(presets) - 1
+		}
+		m.status = "Deleted preset: " + msg.name
 		return m, nil
 	case queryMsg:
 		m.busy = false
@@ -450,6 +506,12 @@ func (m model) View() string {
 	}
 	if m.dataInspectOpen {
 		body = m.viewDataInspectScreen()
+	}
+	if m.dataPresetSaveOpen {
+		body = m.viewDataPresetSaveScreen()
+	}
+	if m.dataPresetListOpen {
+		body = m.viewDataPresetListScreen()
 	}
 	footer := m.viewFooter()
 
@@ -759,6 +821,27 @@ func (m *model) handleSchemaKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.dataSortDesc,
 			m.dataFilters,
 		)
+	case "w":
+		if !m.showingDataPreview() {
+			break
+		}
+		if m.currentDataTableKey() == "" {
+			m.status = "Choose table first"
+			return m, nil
+		}
+		m.dataPresetSaveOpen = true
+		m.dataPresetName.SetValue("")
+		m.dataPresetName.Focus()
+		m.status = "Save current data preset"
+		return m, nil
+	case "p":
+		if !m.showingDataPreview() {
+			break
+		}
+		m.dataPresetListOpen = true
+		m.dataPresetIndex = 0
+		m.status = "Choose preset"
+		return m, nil
 	case "v":
 		if !m.showingDataPreview() || len(m.dataColumns) == 0 || len(m.dataRows) == 0 {
 			m.status = "Load data first"
@@ -933,6 +1016,79 @@ func (m *model) handleDataInspectKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m *model) handleDataPresetSaveKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q":
+		m.dataPresetSaveOpen = false
+		m.dataPresetName.Blur()
+		m.status = "Preset save cancelled"
+		return m, nil
+	case "enter":
+		name := strings.TrimSpace(m.dataPresetName.Value())
+		if name == "" {
+			m.status = "Preset name is required"
+			return m, nil
+		}
+		tableKey := m.currentDataTableKey()
+		if tableKey == "" {
+			m.status = "Choose table first"
+			return m, nil
+		}
+		m.busy = true
+		return m, saveDataPresetCmd(tableKey, m.currentDataPreset(name))
+	}
+
+	var cmd tea.Cmd
+	m.dataPresetName, cmd = m.dataPresetName.Update(msg)
+	return m, cmd
+}
+
+func (m *model) handleDataPresetListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	presets := m.dataPresetsForSelectedTable()
+	switch msg.String() {
+	case "esc", "q", "p":
+		m.dataPresetListOpen = false
+		m.status = m.dataStatus()
+		return m, nil
+	case "up", "k":
+		if m.dataPresetIndex > 0 {
+			m.dataPresetIndex--
+		}
+		return m, nil
+	case "down", "j":
+		if m.dataPresetIndex < len(presets)-1 {
+			m.dataPresetIndex++
+		}
+		return m, nil
+	case "d":
+		if len(presets) == 0 {
+			m.status = "No presets to delete"
+			return m, nil
+		}
+		m.busy = true
+		return m, deleteDataPresetCmd(m.currentDataTableKey(), presets[m.dataPresetIndex].Name)
+	case "enter":
+		if len(presets) == 0 {
+			m.status = "No presets to apply"
+			return m, nil
+		}
+		m.applyDataPreset(presets[m.dataPresetIndex])
+		m.dataPresetListOpen = false
+		m.busy = true
+		return m, runDataPreviewCmd(
+			m.opts,
+			m.effectiveConnection(),
+			m.effectiveSchema(),
+			m.selectedTable,
+			m.dataPageSize,
+			m.dataSortCol,
+			m.dataSortDesc,
+			m.dataFilters,
+		)
+	}
+	return m, nil
+}
+
 func (m *model) handleSchemaTablePickerKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	filtered := m.filteredSchemaTables()
 
@@ -1083,6 +1239,7 @@ func (m *model) resize() {
 	m.execPattern.Width = max(16, min(40, m.width-8))
 	m.dataInspect.Width = max(24, min(100, m.width-10))
 	m.dataInspect.Height = max(8, m.height-12)
+	m.dataPresetName.Width = max(24, min(48, m.width-12))
 
 	for i := range m.formFields {
 		m.formFields[i].Width = max(24, min(56, m.width-14))
@@ -1114,6 +1271,11 @@ func (m *model) clearDataPreview() {
 	m.dataFilters = nil
 	m.dataInspectOpen = false
 	m.dataInspect.SetContent("")
+	m.dataPresetSaveOpen = false
+	m.dataPresetListOpen = false
+	m.dataPresetName.SetValue("")
+	m.dataPresetName.Blur()
+	m.dataPresetIndex = 0
 }
 
 func (m model) hasDataPreview() bool {
@@ -1501,6 +1663,55 @@ func (m model) formatDataFilter(filter db.PreviewFilter) string {
 	return filter.Column + ": " + strings.Join(parts, " ")
 }
 
+func (m model) currentDataTableKey() string {
+	if m.selectedTable == "" {
+		return ""
+	}
+	return m.effectiveSchema() + "." + m.selectedTable
+}
+
+func (m model) dataPresetsForSelectedTable() []config.DataPreset {
+	if m.cfg == nil || m.cfg.DataPresets == nil {
+		return nil
+	}
+	tableKey := m.currentDataTableKey()
+	presets := append([]config.DataPreset(nil), m.cfg.DataPresets[tableKey]...)
+	sort.SliceStable(presets, func(i, j int) bool {
+		return strings.ToLower(presets[i].Name) < strings.ToLower(presets[j].Name)
+	})
+	return presets
+}
+
+func (m model) currentDataPreset(name string) config.DataPreset {
+	return config.DataPreset{
+		Name:         name,
+		PageSize:     max(100, m.dataPageSize),
+		SortColumn:   m.dataSortCol,
+		SortDesc:     m.dataSortDesc,
+		PinnedColumn: m.dataPinnedCol,
+		Filters:      toConfigFilters(m.dataFilters),
+	}
+}
+
+func (m *model) applyDataPreset(preset config.DataPreset) {
+	m.dataPageSize = max(100, preset.PageSize)
+	m.dataSortCol = preset.SortColumn
+	m.dataSortDesc = preset.SortDesc
+	m.dataPinnedCol = preset.PinnedColumn
+	m.dataFilters = fromConfigFilters(preset.Filters)
+	m.dataRowOffset = 0
+	m.dataColOffset = 0
+	m.dataSelectedRow = 0
+	m.dataEOF = false
+	m.dataLoadingMore = false
+	m.dataInspectOpen = false
+	m.schemaArg.SetValue("")
+	if input := m.selectedColumnFilterInput(); input != "" {
+		m.schemaArg.SetValue(input)
+	}
+	m.status = "Applied preset: " + preset.Name
+}
+
 func (m model) selectedColumnFilterInput() string {
 	column := m.selectedDataColumnName()
 	if column == "" {
@@ -1533,6 +1744,30 @@ func (m *model) removeDataFilter(column string) bool {
 		return true
 	}
 	return false
+}
+
+func toConfigFilters(filters []db.PreviewFilter) []config.DataPresetFilter {
+	out := make([]config.DataPresetFilter, 0, len(filters))
+	for _, filter := range filters {
+		out = append(out, config.DataPresetFilter{
+			Column:   filter.Column,
+			Include:  filter.Include,
+			Excludes: append([]string(nil), filter.Excludes...),
+		})
+	}
+	return out
+}
+
+func fromConfigFilters(filters []config.DataPresetFilter) []db.PreviewFilter {
+	out := make([]db.PreviewFilter, 0, len(filters))
+	for _, filter := range filters {
+		out = append(out, db.PreviewFilter{
+			Column:   filter.Column,
+			Include:  filter.Include,
+			Excludes: append([]string(nil), filter.Excludes...),
+		})
+	}
+	return out
 }
 
 func (m *model) openDataInspect() {
@@ -1942,7 +2177,7 @@ func (m model) viewFooter() string {
 	case tabConnections:
 		help = "enter select  u default  t test  n new  e edit  d delete  s schema"
 	case tabSchema:
-		help = "enter load/run  arrows move data  v details  o sort  a search  d drop-filter  f pin  r reset  tab/esc/q back  s schema  x clear table"
+		help = "enter load/run  arrows move data  w save-preset  p presets  v details  o sort  a search  d drop-filter  f pin  r reset  tab/esc/q back  s schema  x clear table"
 	case tabQuery:
 		help = "ctrl+e run  ctrl+k clear  s schema"
 	case tabExec:
@@ -1981,6 +2216,70 @@ func (m model) viewSchemaSwitchScreen() string {
 		Border(lipgloss.DoubleBorder()).
 		Padding(1, 2).
 		Width(min(48, m.width-4)).
+		Render(strings.Join(lines, "\n"))
+
+	return lipgloss.NewStyle().
+		Width(max(20, m.width)).
+		Height(max(8, m.height-5)).
+		Align(lipgloss.Center, lipgloss.Center).
+		Render(card)
+}
+
+func (m model) viewDataPresetSaveScreen() string {
+	lines := []string{
+		"Save Data Preset",
+		"",
+		"Name:",
+		m.dataPresetName.View(),
+		"",
+		"enter save, esc cancel",
+	}
+
+	card := lipgloss.NewStyle().
+		Border(lipgloss.DoubleBorder()).
+		Padding(1, 2).
+		Width(min(56, m.width-4)).
+		Render(strings.Join(lines, "\n"))
+
+	return lipgloss.NewStyle().
+		Width(max(20, m.width)).
+		Height(max(8, m.height-5)).
+		Align(lipgloss.Center, lipgloss.Center).
+		Render(card)
+}
+
+func (m model) viewDataPresetListScreen() string {
+	presets := m.dataPresetsForSelectedTable()
+	lines := []string{
+		"Data Presets",
+		"",
+		"Table: " + displayOr(m.currentDataTableKey(), "-"),
+		"",
+	}
+
+	if len(presets) == 0 {
+		lines = append(lines, "No saved presets for this table.")
+	} else {
+		limit := min(len(presets), max(8, m.height-14))
+		start := 0
+		if m.dataPresetIndex >= limit {
+			start = m.dataPresetIndex - limit + 1
+		}
+		for i := start; i < min(start+limit, len(presets)); i++ {
+			prefix := "  "
+			if i == m.dataPresetIndex {
+				prefix = "> "
+			}
+			lines = append(lines, prefix+presets[i].Name)
+		}
+	}
+
+	lines = append(lines, "", "enter apply, d delete, esc cancel")
+
+	card := lipgloss.NewStyle().
+		Border(lipgloss.DoubleBorder()).
+		Padding(1, 2).
+		Width(min(64, m.width-4)).
 		Render(strings.Join(lines, "\n"))
 
 	return lipgloss.NewStyle().
@@ -2337,6 +2636,68 @@ func setDefaultCmd(name string) tea.Cmd {
 			return setDefaultMsg{err: err}
 		}
 		return setDefaultMsg{cfg: cfg}
+	}
+}
+
+func saveDataPresetCmd(tableKey string, preset config.DataPreset) tea.Cmd {
+	return func() tea.Msg {
+		cfg, err := config.Load()
+		if err != nil {
+			return dataPresetSaveMsg{err: err}
+		}
+		if cfg.DataPresets == nil {
+			cfg.DataPresets = map[string][]config.DataPreset{}
+		}
+
+		presets := append([]config.DataPreset(nil), cfg.DataPresets[tableKey]...)
+		replaced := false
+		for i := range presets {
+			if strings.EqualFold(presets[i].Name, preset.Name) {
+				presets[i] = preset
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			presets = append(presets, preset)
+		}
+		cfg.DataPresets[tableKey] = presets
+
+		if err := config.Save(cfg); err != nil {
+			return dataPresetSaveMsg{err: err}
+		}
+		return dataPresetSaveMsg{cfg: cfg, name: preset.Name}
+	}
+}
+
+func deleteDataPresetCmd(tableKey string, name string) tea.Cmd {
+	return func() tea.Msg {
+		cfg, err := config.Load()
+		if err != nil {
+			return dataPresetDeleteMsg{err: err}
+		}
+		presets := append([]config.DataPreset(nil), cfg.DataPresets[tableKey]...)
+		next := make([]config.DataPreset, 0, len(presets))
+		removed := false
+		for _, preset := range presets {
+			if strings.EqualFold(preset.Name, name) {
+				removed = true
+				continue
+			}
+			next = append(next, preset)
+		}
+		if !removed {
+			return dataPresetDeleteMsg{err: fmt.Errorf("preset %q not found", name)}
+		}
+		if len(next) == 0 {
+			delete(cfg.DataPresets, tableKey)
+		} else {
+			cfg.DataPresets[tableKey] = next
+		}
+		if err := config.Save(cfg); err != nil {
+			return dataPresetDeleteMsg{err: err}
+		}
+		return dataPresetDeleteMsg{cfg: cfg, name: name}
 	}
 }
 
