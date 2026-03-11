@@ -218,7 +218,7 @@ func QuoteIdentifier(value string) string {
 	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
 }
 
-func BuildPreviewSQL(schema string, table string, limit int, offset int) string {
+func BuildPreviewQuery(schema string, table string, limit int, offset int, sortColumn string, sortDesc bool, filterColumn string, filterValue string) (string, []any) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -229,13 +229,43 @@ func BuildPreviewSQL(schema string, table string, limit int, offset int) string 
 		offset = 0
 	}
 
-	return fmt.Sprintf(
-		"SELECT * FROM %s.%s OFFSET %d LIMIT %d;",
-		QuoteIdentifier(schema),
-		QuoteIdentifier(table),
-		offset,
-		limit,
-	)
+	var builder strings.Builder
+	args := make([]any, 0, 3)
+	builder.WriteString("SELECT * FROM ")
+	builder.WriteString(QuoteIdentifier(schema))
+	builder.WriteString(".")
+	builder.WriteString(QuoteIdentifier(table))
+
+	if filterColumn != "" && strings.TrimSpace(filterValue) != "" {
+		args = append(args, "%"+filterValue+"%")
+		builder.WriteString(" WHERE CAST(")
+		builder.WriteString(QuoteIdentifier(filterColumn))
+		builder.WriteString(" AS text) ILIKE $")
+		builder.WriteString(fmt.Sprint(len(args)))
+	}
+
+	if sortColumn != "" {
+		builder.WriteString(" ORDER BY ")
+		builder.WriteString(QuoteIdentifier(sortColumn))
+		if sortDesc {
+			builder.WriteString(" DESC")
+		} else {
+			builder.WriteString(" ASC")
+		}
+	}
+
+	builder.WriteString(" OFFSET ")
+	builder.WriteString(fmt.Sprint(offset))
+	builder.WriteString(" LIMIT ")
+	builder.WriteString(fmt.Sprint(limit))
+	builder.WriteString(";")
+
+	return builder.String(), args
+}
+
+func BuildPreviewSQL(schema string, table string, limit int, offset int) string {
+	sql, _ := BuildPreviewQuery(schema, table, limit, offset, "", false, "", "")
+	return sql
 }
 
 func quoteValue(value string) string {

@@ -154,6 +154,10 @@ type model struct {
 	dataPageSize    int
 	dataLoadingMore bool
 	dataEOF         bool
+	dataSortCol     string
+	dataSortDesc    bool
+	dataFilterCol   string
+	dataFilterValue string
 }
 
 func Run(opts Options) error {
@@ -165,7 +169,7 @@ func Run(opts Options) error {
 
 func newModel(opts Options) model {
 	schemaArg := textinput.New()
-	schemaArg.Placeholder = "schema or limit"
+	schemaArg.Placeholder = "limit or search text"
 	schemaArg.CharLimit = 256
 	schemaArg.Width = 24
 
@@ -321,12 +325,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.dataPageSize = msg.pageSize
 		m.dataEOF = len(msg.rows) < msg.pageSize
 		if msg.offset == 0 {
+			selectedColumn := m.selectedDataColumnName()
 			m.dataColumns = append([]string(nil), msg.columns...)
 			m.dataRows = append([][]string(nil), msg.rows...)
 			m.dataRowOffset = 0
 			m.dataColOffset = 0
 			m.dataSelectedRow = 0
-			m.dataSelectedCol = 0
+			m.dataSelectedCol = indexOfStringFold(msg.columns, selectedColumn)
+			if m.dataSelectedCol < 0 {
+				m.dataSelectedCol = 0
+			}
 		} else {
 			m.dataRows = append(m.dataRows, msg.rows...)
 		}
@@ -404,10 +412,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	var cmd tea.Cmd
 	switch m.activeTab {
-	case tabSchema:
-		if m.schemaArgEdit {
-			m.schemaArg, cmd = m.schemaArg.Update(msg)
-		}
 	case tabQuery:
 		m.queryEditor, cmd = m.queryEditor.Update(msg)
 	case tabExec:
@@ -507,6 +511,10 @@ func (m *model) handleSchemaKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.schemaArg.Blur()
 			return m.runSchemaAction()
 		}
+
+		var cmd tea.Cmd
+		m.schemaArg, cmd = m.schemaArg.Update(msg)
+		return m, cmd
 	}
 
 	if m.showingDataPreview() {
@@ -670,6 +678,50 @@ func (m *model) handleSchemaKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.ensureDataSelectionVisible()
 		m.status = "Pinned column: " + column
 		return m, nil
+	case "o":
+		if !m.showingDataPreview() || len(m.dataColumns) == 0 {
+			break
+		}
+		column := m.dataColumns[m.dataSelectedCol]
+		if strings.EqualFold(m.dataSortCol, column) {
+			m.dataSortDesc = !m.dataSortDesc
+		} else {
+			m.dataSortCol = column
+			m.dataSortDesc = false
+		}
+		m.busy = true
+		return m, runDataPreviewCmd(
+			m.opts,
+			m.effectiveConnection(),
+			m.effectiveSchema(),
+			m.selectedTable,
+			max(100, m.dataPageSize),
+			m.dataSortCol,
+			m.dataSortDesc,
+			m.dataFilterCol,
+			m.dataFilterValue,
+		)
+	case "r":
+		if !m.showingDataPreview() {
+			break
+		}
+		m.schemaArg.SetValue("")
+		m.dataSortCol = ""
+		m.dataSortDesc = false
+		m.dataFilterCol = ""
+		m.dataFilterValue = ""
+		m.busy = true
+		return m, runDataPreviewCmd(
+			m.opts,
+			m.effectiveConnection(),
+			m.effectiveSchema(),
+			m.selectedTable,
+			max(100, m.dataPageSize),
+			"",
+			false,
+			"",
+			"",
+		)
 	case "enter":
 		if m.showingDataPreview() {
 			m.dataFocus = true
@@ -895,12 +947,26 @@ func (m *model) runSchemaAction() (tea.Model, tea.Cmd) {
 			m.busy = false
 			return m, nil
 		}
-		limit, pinned := parseDataArgs(arg, 100)
-		if pinned != "" {
-			m.dataPinnedCol = pinned
-		}
+		limit, filter := parseDataArgs(arg, 100)
 		m.dataPageSize = max(100, limit)
-		return m, runDataPreviewCmd(m.opts, name, m.effectiveSchema(), m.selectedTable, m.dataPageSize)
+		if m.selectedDataColumnName() != "" {
+			m.dataFilterCol = m.selectedDataColumnName()
+			m.dataFilterValue = filter
+		} else if filter == "" {
+			m.dataFilterCol = ""
+			m.dataFilterValue = ""
+		}
+		return m, runDataPreviewCmd(
+			m.opts,
+			name,
+			m.effectiveSchema(),
+			m.selectedTable,
+			m.dataPageSize,
+			m.dataSortCol,
+			m.dataSortDesc,
+			m.dataFilterCol,
+			m.dataFilterValue,
+		)
 	case "Indexes":
 		return m, runSchemaCmd(m.opts, name, m.effectiveSchema(), "Indexes", db.IndexesSQL(arg != ""), anyOrNone(arg)...)
 	case "Users":
@@ -971,6 +1037,10 @@ func (m *model) clearDataPreview() {
 	m.dataPageSize = 0
 	m.dataLoadingMore = false
 	m.dataEOF = false
+	m.dataSortCol = ""
+	m.dataSortDesc = false
+	m.dataFilterCol = ""
+	m.dataFilterValue = ""
 }
 
 func (m model) hasDataPreview() bool {
@@ -1101,12 +1171,14 @@ func (m model) viewDataGrid(width int, height int) string {
 
 	lines := []string{
 		fmt.Sprintf(
-			"rows %d-%d/%d loaded  col:%s  pin:%s  %s",
+			"rows %d-%d/%d loaded  col:%s  pin:%s  sort:%s  find:%s  %s",
 			min(len(m.dataRows), rowOffset+1),
 			endRow,
 			len(m.dataRows),
 			displayOr(m.selectedDataColumnName(), "-"),
 			displayOr(m.activePinnedColumnName(), "-"),
+			displayOr(m.dataSortLabel(), "-"),
+			displayOr(m.dataFilterLabel(), "-"),
 			m.dataFocusHelp(),
 		),
 		buildDataLine("#", rowLabelWidth, headerCells),
@@ -1145,7 +1217,7 @@ func (m model) viewDataGrid(width int, height int) string {
 
 func (m model) dataFocusHelp() string {
 	if m.dataFocus {
-		return "arrows move, f pin selected col, tab back"
+		return "arrows move, o sort, a search, f pin, r reset, tab back"
 	}
 	return "right/tab focus data"
 }
@@ -1270,7 +1342,18 @@ func (m *model) maybeLoadMoreData() tea.Cmd {
 		return nil
 	}
 	m.dataLoadingMore = true
-	return loadMoreDataCmd(m.opts, m.effectiveConnection(), m.effectiveSchema(), m.selectedTable, len(m.dataRows), max(100, m.dataPageSize))
+	return loadMoreDataCmd(
+		m.opts,
+		m.effectiveConnection(),
+		m.effectiveSchema(),
+		m.selectedTable,
+		len(m.dataRows),
+		max(100, m.dataPageSize),
+		m.dataSortCol,
+		m.dataSortDesc,
+		m.dataFilterCol,
+		m.dataFilterValue,
+	)
 }
 
 func (m model) selectedDataColumnName() string {
@@ -1293,6 +1376,24 @@ func (m model) dataStatus() string {
 		status += " | loading more rows..."
 	}
 	return status
+}
+
+func (m model) dataSortLabel() string {
+	if m.dataSortCol == "" {
+		return ""
+	}
+	direction := "asc"
+	if m.dataSortDesc {
+		direction = "desc"
+	}
+	return m.dataSortCol + " " + direction
+}
+
+func (m model) dataFilterLabel() string {
+	if m.dataFilterCol == "" || m.dataFilterValue == "" {
+		return ""
+	}
+	return shorten(m.dataFilterCol+"~"+m.dataFilterValue, 28)
 }
 
 func (m model) renderDataCell(value string, width int, selectedRow bool, selectedColumn bool, pinnedColumn bool) string {
@@ -1550,6 +1651,8 @@ func (m model) viewSchema() string {
 	}
 	if m.showingDataPreview() {
 		left = append(left, "", "Pinned", shorten(displayOr(m.dataPinnedCol, "-"), leftWidth-4))
+		left = append(left, "Sort", shorten(displayOr(m.dataSortLabel(), "-"), leftWidth-4))
+		left = append(left, "Find", shorten(displayOr(m.dataFilterLabel(), "-"), leftWidth-4))
 	}
 	left = append(left, "", "Argument", m.schemaArg.View())
 
@@ -1619,7 +1722,7 @@ func (m model) viewFooter() string {
 	case tabConnections:
 		help = "enter select  u default  t test  n new  e edit  d delete  s schema"
 	case tabSchema:
-		help = "enter load/run  arrows move data  f pin selected column  tab/esc back  a edit arg  s schema  x clear table"
+		help = "enter load/run  arrows move data  o sort  a search  f pin  r reset  tab/esc back  s schema  x clear table"
 	case tabQuery:
 		help = "ctrl+e run  ctrl+k clear  s schema"
 	case tabExec:
@@ -1792,7 +1895,7 @@ func runSchemaCmd(opts Options, name string, schema string, title string, sql st
 	}
 }
 
-func runDataPreviewCmd(opts Options, name string, schema string, table string, limit int) tea.Cmd {
+func runDataPreviewCmd(opts Options, name string, schema string, table string, limit int, sortColumn string, sortDesc bool, filterColumn string, filterValue string) tea.Cmd {
 	return func() tea.Msg {
 		session, err := openSession(opts, name, schema)
 		if err != nil {
@@ -1800,7 +1903,8 @@ func runDataPreviewCmd(opts Options, name string, schema string, table string, l
 		}
 		defer session.Conn.Close(context.Background())
 
-		columns, rows, _, err := db.Query(context.Background(), session.Conn, db.BuildPreviewSQL(schema, table, limit, 0))
+		sql, args := db.BuildPreviewQuery(schema, table, limit, 0, sortColumn, sortDesc, filterColumn, filterValue)
+		columns, rows, _, err := db.Query(context.Background(), session.Conn, sql, args...)
 		if err != nil {
 			return dataPageMsg{title: "Data " + table, schema: schema, table: table, pageSize: limit, err: err}
 		}
@@ -1815,7 +1919,7 @@ func runDataPreviewCmd(opts Options, name string, schema string, table string, l
 	}
 }
 
-func loadMoreDataCmd(opts Options, name string, schema string, table string, offset int, limit int) tea.Cmd {
+func loadMoreDataCmd(opts Options, name string, schema string, table string, offset int, limit int, sortColumn string, sortDesc bool, filterColumn string, filterValue string) tea.Cmd {
 	return func() tea.Msg {
 		session, err := openSession(opts, name, schema)
 		if err != nil {
@@ -1823,7 +1927,8 @@ func loadMoreDataCmd(opts Options, name string, schema string, table string, off
 		}
 		defer session.Conn.Close(context.Background())
 
-		columns, rows, _, err := db.Query(context.Background(), session.Conn, db.BuildPreviewSQL(schema, table, limit, offset))
+		sql, args := db.BuildPreviewQuery(schema, table, limit, offset, sortColumn, sortDesc, filterColumn, filterValue)
+		columns, rows, _, err := db.Query(context.Background(), session.Conn, sql, args...)
 		if err != nil {
 			return dataPageMsg{title: "Data " + table, schema: schema, table: table, offset: offset, pageSize: limit, err: err}
 		}
@@ -2056,17 +2161,15 @@ func parseTableAndLimit(value string, fallback int) (string, int) {
 func parseDataArgs(value string, fallback int) (int, string) {
 	parts := strings.Fields(strings.TrimSpace(value))
 	limit := fallback
-	pinned := ""
+	filterParts := make([]string, 0, len(parts))
 	for _, part := range parts {
 		if number, err := strconv.Atoi(part); err == nil {
 			limit = number
 			continue
 		}
-		if pinned == "" {
-			pinned = part
-		}
+		filterParts = append(filterParts, part)
 	}
-	return limit, pinned
+	return limit, strings.Join(filterParts, " ")
 }
 
 func splitQualifiedTable(value string) (string, string) {
@@ -2215,6 +2318,18 @@ func containsInt(values []int, target int) bool {
 		}
 	}
 	return false
+}
+
+func indexOfStringFold(values []string, target string) int {
+	if target == "" {
+		return -1
+	}
+	for i, value := range values {
+		if strings.EqualFold(value, target) {
+			return i
+		}
+	}
+	return -1
 }
 
 func padLeft(value string, width int) string {
