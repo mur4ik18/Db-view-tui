@@ -1,0 +1,24 @@
+.DS_Store
+
+# Build artifacts
+dbctl
+*.exe
+*.out
+*.test
+coverage.out
+
+# Pixi environment
+.pixi/
+
+# Editor/local temp files
+*.log
+*.tmp
+*.swp
+*.swo
+
+# Local secrets and connection data
+.env
+.env.*
+.dbctl/
+config.local.*
+connections.local.*
