@@ -18,6 +18,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/jackc/pgx/v5"
 )
 
 type Options struct {
@@ -83,14 +84,16 @@ type schemaTablesMsg struct {
 }
 
 type dataPageMsg struct {
-	title    string
-	schema   string
-	table    string
-	columns  []string
-	rows     [][]string
-	offset   int
-	pageSize int
-	err      error
+	title     string
+	schema    string
+	table     string
+	columns   []string
+	rows      [][]string
+	offset    int
+	pageSize  int
+	totalRows int
+	matchRows int
+	err       error
 }
 
 type dataPresetSaveMsg struct {
@@ -166,6 +169,8 @@ type model struct {
 	dataPageSize    int
 	dataLoadingMore bool
 	dataEOF         bool
+	dataTotalRows   int
+	dataMatchRows   int
 	dataSortCol     string
 	dataSortDesc    bool
 	dataFilters     []db.PreviewFilter
@@ -361,6 +366,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.schemaIndex = m.indexOfSchemaAction("Data")
 		m.dataPageSize = msg.pageSize
 		m.dataEOF = len(msg.rows) < msg.pageSize
+		if msg.offset == 0 {
+			m.dataTotalRows = msg.totalRows
+			m.dataMatchRows = msg.matchRows
+		}
 		if msg.offset == 0 {
 			selectedColumn := m.selectedDataColumnName()
 			m.dataColumns = append([]string(nil), msg.columns...)
@@ -1266,6 +1275,8 @@ func (m *model) clearDataPreview() {
 	m.dataPageSize = 0
 	m.dataLoadingMore = false
 	m.dataEOF = false
+	m.dataTotalRows = 0
+	m.dataMatchRows = 0
 	m.dataSortCol = ""
 	m.dataSortDesc = false
 	m.dataFilters = nil
@@ -1406,10 +1417,12 @@ func (m model) viewDataGrid(width int, height int) string {
 
 	lines := []string{
 		fmt.Sprintf(
-			"rows %d-%d/%d loaded  col:%s  pin:%s  sort:%s  find:%s  %s",
+			"rows %d-%d/%d loaded  matched:%d  total:%d  col:%s  pin:%s  sort:%s  find:%s  %s",
 			min(len(m.dataRows), rowOffset+1),
 			endRow,
 			len(m.dataRows),
+			m.dataMatchedRows(),
+			m.dataTotalRows,
 			displayOr(m.selectedDataColumnName(), "-"),
 			displayOr(m.activePinnedColumnName(), "-"),
 			displayOr(m.dataSortLabel(), "-"),
@@ -1605,11 +1618,18 @@ func (m model) dataStatus() string {
 	if len(m.dataRows) > 0 {
 		row = m.dataSelectedRow + 1
 	}
-	status := fmt.Sprintf("Data row %d/%d col %s", row, len(m.dataRows), displayOr(m.selectedDataColumnName(), "-"))
+	status := fmt.Sprintf("Data row %d/%d col %s | matched %d | total %d", row, len(m.dataRows), displayOr(m.selectedDataColumnName(), "-"), m.dataMatchedRows(), m.dataTotalRows)
 	if m.dataLoadingMore {
 		status += " | loading more rows..."
 	}
 	return status
+}
+
+func (m model) dataMatchedRows() int {
+	if len(m.dataFilters) == 0 {
+		return m.dataTotalRows
+	}
+	return m.dataMatchRows
 }
 
 func (m *model) upsertDataFilter(column string, include string, excludes []string) {
@@ -2450,18 +2470,32 @@ func runDataPreviewCmd(opts Options, name string, schema string, table string, l
 		}
 		defer session.Conn.Close(context.Background())
 
+		totalRows, err := queryCount(context.Background(), session.Conn, schema, table, nil)
+		if err != nil {
+			return dataPageMsg{title: "Data " + table, schema: schema, table: table, pageSize: limit, err: err}
+		}
+		matchRows := totalRows
+		if len(filters) > 0 {
+			matchRows, err = queryCount(context.Background(), session.Conn, schema, table, filters)
+			if err != nil {
+				return dataPageMsg{title: "Data " + table, schema: schema, table: table, pageSize: limit, err: err}
+			}
+		}
+
 		sql, args := db.BuildPreviewQuery(schema, table, limit, 0, sortColumn, sortDesc, filters)
 		columns, rows, _, err := db.Query(context.Background(), session.Conn, sql, args...)
 		if err != nil {
 			return dataPageMsg{title: "Data " + table, schema: schema, table: table, pageSize: limit, err: err}
 		}
 		return dataPageMsg{
-			title:    fmt.Sprintf("Data %s (%d rows loaded)", table, len(rows)),
-			schema:   schema,
-			table:    table,
-			columns:  columns,
-			rows:     rows,
-			pageSize: limit,
+			title:     fmt.Sprintf("Data %s (%d rows loaded)", table, len(rows)),
+			schema:    schema,
+			table:     table,
+			columns:   columns,
+			rows:      rows,
+			pageSize:  limit,
+			totalRows: totalRows,
+			matchRows: matchRows,
 		}
 	}
 }
@@ -2489,6 +2523,18 @@ func loadMoreDataCmd(opts Options, name string, schema string, table string, off
 			pageSize: limit,
 		}
 	}
+}
+
+func queryCount(ctx context.Context, conn *pgx.Conn, schema string, table string, filters []db.PreviewFilter) (int, error) {
+	sql, args := db.BuildCountQuery(schema, table, filters)
+	columns, rows, _, err := db.Query(ctx, conn, sql, args...)
+	if err != nil {
+		return 0, err
+	}
+	if len(columns) == 0 || len(rows) == 0 || len(rows[0]) == 0 {
+		return 0, nil
+	}
+	return parseInt(rows[0][0], 0), nil
 }
 
 func runQueryCmd(opts Options, name string, schema string, sql string) tea.Cmd {

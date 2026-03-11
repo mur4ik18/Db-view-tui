@@ -224,20 +224,14 @@ func QuoteIdentifier(value string) string {
 	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
 }
 
-func BuildPreviewQuery(schema string, table string, limit int, offset int, sortColumn string, sortDesc bool, filters []PreviewFilter) (string, []any) {
-	if limit <= 0 {
-		limit = 100
-	}
+func buildFilteredFromClause(schema string, table string, filters []PreviewFilter) (string, []any) {
 	if schema == "" {
 		schema = "public"
-	}
-	if offset < 0 {
-		offset = 0
 	}
 
 	var builder strings.Builder
 	args := make([]any, 0, 8)
-	builder.WriteString("SELECT * FROM ")
+	builder.WriteString(" FROM ")
 	builder.WriteString(QuoteIdentifier(schema))
 	builder.WriteString(".")
 	builder.WriteString(QuoteIdentifier(table))
@@ -289,6 +283,21 @@ func BuildPreviewQuery(schema string, table string, limit int, offset int, sortC
 		builder.WriteString(")")
 	}
 
+	return builder.String(), args
+}
+
+func BuildPreviewQuery(schema string, table string, limit int, offset int, sortColumn string, sortDesc bool, filters []PreviewFilter) (string, []any) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	fromClause, args := buildFilteredFromClause(schema, table, filters)
+	var builder strings.Builder
+	builder.WriteString("SELECT *")
+	builder.WriteString(fromClause)
 	if sortColumn != "" {
 		builder.WriteString(" ORDER BY ")
 		builder.WriteString(QuoteIdentifier(sortColumn))
@@ -298,14 +307,17 @@ func BuildPreviewQuery(schema string, table string, limit int, offset int, sortC
 			builder.WriteString(" ASC")
 		}
 	}
-
 	builder.WriteString(" OFFSET ")
 	builder.WriteString(fmt.Sprint(offset))
 	builder.WriteString(" LIMIT ")
 	builder.WriteString(fmt.Sprint(limit))
 	builder.WriteString(";")
-
 	return builder.String(), args
+}
+
+func BuildCountQuery(schema string, table string, filters []PreviewFilter) (string, []any) {
+	fromClause, args := buildFilteredFromClause(schema, table, filters)
+	return "SELECT count(*)" + fromClause + ";", args
 }
 
 func BuildPreviewSQL(schema string, table string, limit int, offset int) string {
