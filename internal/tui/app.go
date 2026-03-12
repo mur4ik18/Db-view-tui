@@ -201,7 +201,7 @@ func Run(opts Options) error {
 
 func newModel(opts Options) model {
 	schemaArg := textinput.New()
-	schemaArg.Placeholder = "search -exclude limit=100"
+	schemaArg.Placeholder = "search =exact -exclude -=exact limit=100"
 	schemaArg.CharLimit = 256
 	schemaArg.Width = 24
 

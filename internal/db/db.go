@@ -260,10 +260,16 @@ func buildFilteredFromClause(schema string, table string, filters []PreviewFilte
 
 		wroteClause := false
 		if include != "" {
-			args = append(args, "%"+include+"%")
 			builder.WriteString("CAST(")
 			builder.WriteString(QuoteIdentifier(column))
-			builder.WriteString(" AS text) ILIKE $")
+			builder.WriteString(" AS text)")
+			includeValue, exactInclude := parseFilterValue(include)
+			args = append(args, includeValue)
+			if exactInclude {
+				builder.WriteString(" = $")
+			} else {
+				builder.WriteString(" ILIKE $")
+			}
 			builder.WriteString(fmt.Sprint(len(args)))
 			wroteClause = true
 		}
@@ -276,10 +282,16 @@ func buildFilteredFromClause(schema string, table string, filters []PreviewFilte
 			if wroteClause {
 				builder.WriteString(" AND ")
 			}
-			args = append(args, "%"+excludeValue+"%")
 			builder.WriteString("CAST(")
 			builder.WriteString(QuoteIdentifier(column))
-			builder.WriteString(" AS text) NOT ILIKE $")
+			builder.WriteString(" AS text)")
+			excludeArg, exactExclude := parseFilterValue(excludeValue)
+			args = append(args, excludeArg)
+			if exactExclude {
+				builder.WriteString(" <> $")
+			} else {
+				builder.WriteString(" NOT ILIKE $")
+			}
 			builder.WriteString(fmt.Sprint(len(args)))
 			wroteClause = true
 		}
@@ -291,6 +303,13 @@ func buildFilteredFromClause(schema string, table string, filters []PreviewFilte
 	}
 
 	return builder.String(), args
+}
+
+func parseFilterValue(value string) (string, bool) {
+	if exactValue, ok := strings.CutPrefix(value, "="); ok {
+		return exactValue, true
+	}
+	return "%" + value + "%", false
 }
 
 func BuildPreviewQuery(schema string, table string, limit int, offset int, sortColumn string, sortDesc bool, distinctColumn string, filters []PreviewFilter) (string, []any) {
