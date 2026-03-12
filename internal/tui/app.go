@@ -108,6 +108,12 @@ type dataPresetDeleteMsg struct {
 	err  error
 }
 
+type schemaTableItem struct {
+	schema  string
+	table   string
+	isGroup bool
+}
+
 type model struct {
 	opts Options
 
@@ -123,6 +129,7 @@ type model struct {
 	connectionNames   []string
 	connectionIndex   int
 	currentConnection string
+	showConnAddress   bool
 	selectedTable     string
 
 	schemaActions []string
@@ -157,6 +164,7 @@ type model struct {
 	schemaTableNames      []string
 	schemaTableIndex      int
 	schemaTableFocus      bool
+	schemaTableExpanded   map[string]bool
 
 	dataColumns     []string
 	dataRows        [][]string
@@ -477,7 +485,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.schemaTableNames = msg.tables
-		m.schemaTableIndex = 0
+		m.resetSchemaTableGroups()
 		m.schemaTableFocus = true
 		m.status = "Choose table in the right panel"
 		return m, nil
@@ -559,6 +567,13 @@ func (m *model) handleConnectionsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.busy = true
 		return m, testConnectionCmd(m.opts, name)
+	case "h":
+		m.showConnAddress = !m.showConnAddress
+		if m.showConnAddress {
+			m.status = "Connection address shown"
+		} else {
+			m.status = "Connection address hidden"
+		}
 	case "n":
 		m.openForm("", config.Connection{})
 	case "e":
@@ -687,18 +702,44 @@ func (m *model) handleSchemaKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.schemaTableIndex > 0 {
 				m.schemaTableIndex--
 			}
+			m.normalizeSchemaTableSelection()
 			return m, nil
 		case "down", "j":
-			if m.schemaTableIndex < len(m.schemaTableNames)-1 {
+			if m.schemaTableIndex < len(m.visibleSchemaTableItems())-1 {
 				m.schemaTableIndex++
+			}
+			m.normalizeSchemaTableSelection()
+			return m, nil
+		case "right", "l":
+			if schema, changed := m.expandSelectedSchemaTable(); changed {
+				m.status = "Expanded schema: " + schema
+			}
+			return m, nil
+		case "left", "h":
+			if schema, changed := m.collapseSelectedSchemaTable(); changed {
+				m.status = "Collapsed schema: " + schema
+				return m, nil
 			}
 			return m, nil
 		case "enter":
-			if len(m.schemaTableNames) == 0 {
+			item, ok := m.selectedSchemaTableItem()
+			if !ok {
 				m.status = "No tables found"
 				return m, nil
 			}
-			schema, table := splitQualifiedTable(m.schemaTableNames[m.schemaTableIndex])
+			if item.isGroup {
+				if m.schemaTableExpanded[item.schema] {
+					m.schemaTableExpanded[item.schema] = false
+					m.normalizeSchemaTableSelection()
+					m.status = "Collapsed schema: " + item.schema
+				} else {
+					m.schemaTableExpanded[item.schema] = true
+					m.normalizeSchemaTableSelection()
+					m.status = "Expanded schema: " + item.schema
+				}
+				return m, nil
+			}
+			schema, table := item.schema, item.table
 			m.currentSchema = defaultString(schema, m.currentSchema)
 			m.selectedTable = table
 			m.clearDataPreview()
@@ -707,7 +748,7 @@ func (m *model) handleSchemaKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.schemaIndex = m.indexOfSchemaAction("Columns")
 			m.busy = true
 			return m, runSchemaCmd(m.opts, m.effectiveConnection(), m.effectiveSchema(), "Columns "+m.selectedTable, db.ColumnConstraintsSQL(), m.selectedTable)
-		case "tab", "left", "h", "esc", "q":
+		case "tab", "esc", "q":
 			m.schemaTableFocus = false
 			m.status = "Schema actions"
 			return m, nil
@@ -1308,6 +1349,119 @@ func (m *model) filteredSchemaTables() []string {
 	return filtered
 }
 
+func (m *model) schemaTableSchemas() []string {
+	schemas := make([]string, 0)
+	current := ""
+	for _, table := range m.schemaTableNames {
+		schema, _ := splitQualifiedTable(table)
+		if schema == current {
+			continue
+		}
+		current = schema
+		schemas = append(schemas, schema)
+	}
+	return schemas
+}
+
+func (m *model) resetSchemaTableGroups() {
+	schemas := m.schemaTableSchemas()
+	m.schemaTableExpanded = make(map[string]bool, len(schemas))
+	expandAll := len(schemas) <= 1
+	for _, schema := range schemas {
+		m.schemaTableExpanded[schema] = expandAll
+	}
+
+	m.schemaTableIndex = 0
+	if m.selectedTable != "" {
+		targetSchema := m.effectiveSchema()
+		if expandAll {
+			items := m.visibleSchemaTableItems()
+			for i, item := range items {
+				if !item.isGroup && item.schema == targetSchema && item.table == m.selectedTable {
+					m.schemaTableIndex = i
+					break
+				}
+			}
+		} else {
+			for i, schema := range schemas {
+				if schema == targetSchema {
+					m.schemaTableIndex = i
+					break
+				}
+			}
+		}
+	}
+	m.normalizeSchemaTableSelection()
+}
+
+func (m *model) visibleSchemaTableItems() []schemaTableItem {
+	items := make([]schemaTableItem, 0, len(m.schemaTableNames))
+	currentSchema := ""
+	for _, qualified := range m.schemaTableNames {
+		schema, table := splitQualifiedTable(qualified)
+		if schema != currentSchema {
+			currentSchema = schema
+			items = append(items, schemaTableItem{schema: schema, isGroup: true})
+		}
+		if m.schemaTableExpanded[schema] {
+			items = append(items, schemaTableItem{schema: schema, table: table})
+		}
+	}
+	return items
+}
+
+func (m *model) normalizeSchemaTableSelection() {
+	items := m.visibleSchemaTableItems()
+	if len(items) == 0 {
+		m.schemaTableIndex = 0
+		return
+	}
+	if m.schemaTableIndex < 0 {
+		m.schemaTableIndex = 0
+	}
+	if m.schemaTableIndex >= len(items) {
+		m.schemaTableIndex = len(items) - 1
+	}
+}
+
+func (m *model) selectedSchemaTableItem() (schemaTableItem, bool) {
+	items := m.visibleSchemaTableItems()
+	if len(items) == 0 {
+		return schemaTableItem{}, false
+	}
+	m.normalizeSchemaTableSelection()
+	return items[m.schemaTableIndex], true
+}
+
+func (m *model) collapseSelectedSchemaTable() (string, bool) {
+	item, ok := m.selectedSchemaTableItem()
+	if !ok || !m.schemaTableExpanded[item.schema] {
+		return "", false
+	}
+
+	m.schemaTableExpanded[item.schema] = false
+	items := m.visibleSchemaTableItems()
+	for i, candidate := range items {
+		if candidate.isGroup && candidate.schema == item.schema {
+			m.schemaTableIndex = i
+			break
+		}
+	}
+	m.normalizeSchemaTableSelection()
+	return item.schema, true
+}
+
+func (m *model) expandSelectedSchemaTable() (string, bool) {
+	item, ok := m.selectedSchemaTableItem()
+	if !ok || !item.isGroup || m.schemaTableExpanded[item.schema] {
+		return "", false
+	}
+
+	m.schemaTableExpanded[item.schema] = true
+	m.normalizeSchemaTableSelection()
+	return item.schema, true
+}
+
 func (m *model) isTableListAction() bool {
 	actions := m.visibleSchemaActions()
 	if len(actions) == 0 || m.schemaIndex >= len(actions) {
@@ -1330,29 +1484,38 @@ func (m *model) showingDataPreview() bool {
 
 func (m *model) schemaTableDisplayLines(width int) ([]string, int) {
 	lines := []string{
-		"Use right/tab to focus list, Enter opens columns",
+		"Use right/tab to focus list, right expand, left collapse, Enter opens columns",
 		"",
 	}
 	selectedLine := 0
+	items := m.visibleSchemaTableItems()
+	selectedSchema := m.effectiveSchema()
 
-	currentSchema := ""
-	for i, table := range m.schemaTableNames {
-		schema, name := splitQualifiedTable(table)
-		if schema != currentSchema {
-			currentSchema = schema
-			lines = append(lines, "["+schema+"]")
-		}
-
+	for i, item := range items {
 		prefix := "  "
 		if m.schemaTableFocus && i == m.schemaTableIndex {
 			prefix = "> "
 			selectedLine = len(lines)
 		}
-		if !m.schemaTableFocus && schema == m.effectiveSchema() && name == m.selectedTable {
+
+		if item.isGroup {
+			marker := "[+]"
+			if m.schemaTableExpanded[item.schema] {
+				marker = "[-]"
+			}
+			if !m.schemaTableFocus && item.schema == selectedSchema && !m.schemaTableExpanded[item.schema] {
+				prefix = "* "
+				selectedLine = len(lines)
+			}
+			lines = append(lines, prefix+marker+" "+shorten(item.schema, width-4))
+			continue
+		}
+
+		if !m.schemaTableFocus && item.schema == selectedSchema && item.table == m.selectedTable {
 			prefix = "* "
 			selectedLine = len(lines)
 		}
-		lines = append(lines, prefix+shorten(name, width-2))
+		lines = append(lines, prefix+"  "+shorten(item.table, width-4))
 	}
 
 	return lines, selectedLine
@@ -2071,17 +2234,25 @@ func (m model) viewConnections() string {
 	right := []string{"Details"}
 	if name := m.selectedConnectionName(); name != "" {
 		conn := m.cfg.Connections[name]
+		hostValue := "[hidden]"
+		if m.showConnAddress {
+			hostValue = displayOr(conn.Host, "-")
+		}
 		right = append(right,
 			"",
 			"Name: "+shorten(name, rightWidth-10),
-			"Host: "+shorten(displayOr(conn.Host, "-"), rightWidth-10),
+			"Host: "+shorten(hostValue, rightWidth-10),
 			"Port: "+displayOr(intString(conn.Port), "-"),
 			"DB: "+shorten(displayOr(conn.Database, "-"), rightWidth-8),
 			"User: "+shorten(displayOr(conn.User, "-"), rightWidth-10),
 			"SSL: "+shorten(displayOr(conn.SSLMode, "-"), rightWidth-9),
 		)
 		if conn.URL != "" {
-			right = append(right, "URL: "+shorten(conn.URL, rightWidth-9))
+			urlValue := "[hidden]"
+			if m.showConnAddress {
+				urlValue = conn.URL
+			}
+			right = append(right, "URL: "+shorten(urlValue, rightWidth-9))
 		}
 	}
 	if m.detail.View() != "" {
@@ -2195,7 +2366,7 @@ func (m model) viewFooter() string {
 	help := ""
 	switch m.activeTab {
 	case tabConnections:
-		help = "enter select  u default  t test  n new  e edit  d delete  s schema"
+		help = "enter select  u default  t test  h addr  n new  e edit  d delete  s schema"
 	case tabSchema:
 		help = "enter load/run  arrows move data  w save-preset  p presets  v details  o sort  a search  d drop-filter  f pin  r reset  tab/esc/q back  s schema  x clear table"
 	case tabQuery:
