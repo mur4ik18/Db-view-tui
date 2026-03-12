@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"database/sql/driver"
 	"dbctl/internal/config"
 	"fmt"
 	"strings"
@@ -215,6 +216,12 @@ func FormatValue(value any) string {
 		return string(v)
 	case time.Time:
 		return v.Format(time.RFC3339)
+	case driver.Valuer:
+		text, err := v.Value()
+		if err == nil {
+			return FormatValue(text)
+		}
+		return fmt.Sprint(v)
 	default:
 		return fmt.Sprint(v)
 	}
