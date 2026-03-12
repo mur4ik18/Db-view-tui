@@ -181,6 +181,7 @@ type model struct {
 	dataMatchRows   int
 	dataSortCol     string
 	dataSortDesc    bool
+	dataUniqueCol   string
 	dataFilters     []db.PreviewFilter
 	dataInspect     viewport.Model
 	dataInspectOpen bool
@@ -825,6 +826,31 @@ func (m *model) handleSchemaKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			max(100, m.dataPageSize),
 			m.dataSortCol,
 			m.dataSortDesc,
+			m.dataUniqueCol,
+			m.dataFilters,
+		)
+	case "u":
+		if !m.showingDataPreview() || len(m.dataColumns) == 0 {
+			break
+		}
+		column := m.dataColumns[m.dataSelectedCol]
+		if strings.EqualFold(m.dataUniqueCol, column) {
+			m.dataUniqueCol = ""
+			m.status = "Unique mode cleared"
+		} else {
+			m.dataUniqueCol = column
+			m.status = "Unique by column: " + column
+		}
+		m.busy = true
+		return m, runDataPreviewCmd(
+			m.opts,
+			m.effectiveConnection(),
+			m.effectiveSchema(),
+			m.selectedTable,
+			max(100, m.dataPageSize),
+			m.dataSortCol,
+			m.dataSortDesc,
+			m.dataUniqueCol,
 			m.dataFilters,
 		)
 	case "r":
@@ -834,6 +860,7 @@ func (m *model) handleSchemaKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.schemaArg.SetValue("")
 		m.dataSortCol = ""
 		m.dataSortDesc = false
+		m.dataUniqueCol = ""
 		m.dataFilters = nil
 		m.busy = true
 		return m, runDataPreviewCmd(
@@ -844,6 +871,7 @@ func (m *model) handleSchemaKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			max(100, m.dataPageSize),
 			"",
 			false,
+			"",
 			nil,
 		)
 	case "d":
@@ -869,6 +897,7 @@ func (m *model) handleSchemaKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			max(100, m.dataPageSize),
 			m.dataSortCol,
 			m.dataSortDesc,
+			m.dataUniqueCol,
 			m.dataFilters,
 		)
 	case "w":
@@ -1133,6 +1162,7 @@ func (m *model) handleDataPresetListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.dataPageSize,
 			m.dataSortCol,
 			m.dataSortDesc,
+			m.dataUniqueCol,
 			m.dataFilters,
 		)
 	}
@@ -1241,6 +1271,7 @@ func (m *model) runSchemaAction() (tea.Model, tea.Cmd) {
 			m.dataPageSize,
 			m.dataSortCol,
 			m.dataSortDesc,
+			m.dataUniqueCol,
 			m.dataFilters,
 		)
 	case "Indexes":
@@ -1320,6 +1351,7 @@ func (m *model) clearDataPreview() {
 	m.dataMatchRows = 0
 	m.dataSortCol = ""
 	m.dataSortDesc = false
+	m.dataUniqueCol = ""
 	m.dataFilters = nil
 	m.dataInspectOpen = false
 	m.dataInspect.SetContent("")
@@ -1580,7 +1612,7 @@ func (m model) viewDataGrid(width int, height int) string {
 
 	lines := []string{
 		fmt.Sprintf(
-			"rows %d-%d/%d loaded  matched:%d  total:%d  col:%s  pin:%s  sort:%s  find:%s  %s",
+			"rows %d-%d/%d loaded  matched:%d  total:%d  col:%s  pin:%s  sort:%s  uniq:%s  find:%s  %s",
 			min(len(m.dataRows), rowOffset+1),
 			endRow,
 			len(m.dataRows),
@@ -1589,6 +1621,7 @@ func (m model) viewDataGrid(width int, height int) string {
 			displayOr(m.selectedDataColumnName(), "-"),
 			displayOr(m.activePinnedColumnName(), "-"),
 			displayOr(m.dataSortLabel(), "-"),
+			displayOr(m.dataUniqueLabel(), "-"),
 			displayOr(m.dataFilterLabel(), "-"),
 			m.dataFocusHelp(),
 		),
@@ -1628,7 +1661,7 @@ func (m model) viewDataGrid(width int, height int) string {
 
 func (m model) dataFocusHelp() string {
 	if m.dataFocus {
-		return "arrows move, o sort, a search, f pin, r reset, tab back"
+		return "arrows move, o sort, u unique, a search, f pin, r reset, tab back"
 	}
 	return "right/tab focus data"
 }
@@ -1762,6 +1795,7 @@ func (m *model) maybeLoadMoreData() tea.Cmd {
 		max(100, m.dataPageSize),
 		m.dataSortCol,
 		m.dataSortDesc,
+		m.dataUniqueCol,
 		m.dataFilters,
 	)
 }
@@ -1782,6 +1816,9 @@ func (m model) dataStatus() string {
 		row = m.dataSelectedRow + 1
 	}
 	status := fmt.Sprintf("Data row %d/%d col %s | matched %d | total %d", row, len(m.dataRows), displayOr(m.selectedDataColumnName(), "-"), m.dataMatchedRows(), m.dataTotalRows)
+	if unique := m.dataUniqueLabel(); unique != "" {
+		status += " | unique " + unique
+	}
 	if m.dataLoadingMore {
 		status += " | loading more rows..."
 	}
@@ -1871,6 +1908,7 @@ func (m model) currentDataPreset(name string) config.DataPreset {
 		PageSize:     max(100, m.dataPageSize),
 		SortColumn:   m.dataSortCol,
 		SortDesc:     m.dataSortDesc,
+		UniqueColumn: m.dataUniqueCol,
 		PinnedColumn: m.dataPinnedCol,
 		Filters:      toConfigFilters(m.dataFilters),
 	}
@@ -1880,6 +1918,7 @@ func (m *model) applyDataPreset(preset config.DataPreset) {
 	m.dataPageSize = max(100, preset.PageSize)
 	m.dataSortCol = preset.SortColumn
 	m.dataSortDesc = preset.SortDesc
+	m.dataUniqueCol = preset.UniqueColumn
 	m.dataPinnedCol = preset.PinnedColumn
 	m.dataFilters = fromConfigFilters(preset.Filters)
 	m.dataRowOffset = 0
@@ -2003,6 +2042,13 @@ func (m model) dataSortLabel() string {
 		direction = "desc"
 	}
 	return m.dataSortCol + " " + direction
+}
+
+func (m model) dataUniqueLabel() string {
+	if m.dataUniqueCol == "" {
+		return ""
+	}
+	return m.dataUniqueCol
 }
 
 func (m model) dataFilterLabel() string {
@@ -2291,6 +2337,7 @@ func (m model) viewSchema() string {
 	if m.showingDataPreview() {
 		left = append(left, "", "Pinned", shorten(displayOr(m.dataPinnedCol, "-"), leftWidth-4))
 		left = append(left, "Sort", shorten(displayOr(m.dataSortLabel(), "-"), leftWidth-4))
+		left = append(left, "Unique", shorten(displayOr(m.dataUniqueLabel(), "-"), leftWidth-4))
 		if len(m.dataFilters) == 0 {
 			left = append(left, "Filters", "-")
 		} else {
@@ -2368,7 +2415,7 @@ func (m model) viewFooter() string {
 	case tabConnections:
 		help = "enter select  u default  t test  h addr  n new  e edit  d delete  s schema"
 	case tabSchema:
-		help = "enter load/run  arrows move data  w save-preset  p presets  v details  o sort  a search  d drop-filter  f pin  r reset  tab/esc/q back  s schema  x clear table"
+		help = "enter load/run  arrows move data  w save-preset  p presets  v details  o sort  u unique  a search  d drop-filter  f pin  r reset  tab/esc/q back  s schema  x clear table"
 	case tabQuery:
 		help = "ctrl+e run  ctrl+k clear  s schema"
 	case tabExec:
@@ -2633,7 +2680,7 @@ func runSchemaCmd(opts Options, name string, schema string, title string, sql st
 	}
 }
 
-func runDataPreviewCmd(opts Options, name string, schema string, table string, limit int, sortColumn string, sortDesc bool, filters []db.PreviewFilter) tea.Cmd {
+func runDataPreviewCmd(opts Options, name string, schema string, table string, limit int, sortColumn string, sortDesc bool, uniqueColumn string, filters []db.PreviewFilter) tea.Cmd {
 	return func() tea.Msg {
 		session, err := openSession(opts, name, schema)
 		if err != nil {
@@ -2641,19 +2688,19 @@ func runDataPreviewCmd(opts Options, name string, schema string, table string, l
 		}
 		defer session.Conn.Close(context.Background())
 
-		totalRows, err := queryCount(context.Background(), session.Conn, schema, table, nil)
+		totalRows, err := queryCount(context.Background(), session.Conn, schema, table, uniqueColumn, nil)
 		if err != nil {
 			return dataPageMsg{title: "Data " + table, schema: schema, table: table, pageSize: limit, err: err}
 		}
 		matchRows := totalRows
 		if len(filters) > 0 {
-			matchRows, err = queryCount(context.Background(), session.Conn, schema, table, filters)
+			matchRows, err = queryCount(context.Background(), session.Conn, schema, table, uniqueColumn, filters)
 			if err != nil {
 				return dataPageMsg{title: "Data " + table, schema: schema, table: table, pageSize: limit, err: err}
 			}
 		}
 
-		sql, args := db.BuildPreviewQuery(schema, table, limit, 0, sortColumn, sortDesc, filters)
+		sql, args := db.BuildPreviewQuery(schema, table, limit, 0, sortColumn, sortDesc, uniqueColumn, filters)
 		columns, rows, _, err := db.Query(context.Background(), session.Conn, sql, args...)
 		if err != nil {
 			return dataPageMsg{title: "Data " + table, schema: schema, table: table, pageSize: limit, err: err}
@@ -2671,7 +2718,7 @@ func runDataPreviewCmd(opts Options, name string, schema string, table string, l
 	}
 }
 
-func loadMoreDataCmd(opts Options, name string, schema string, table string, offset int, limit int, sortColumn string, sortDesc bool, filters []db.PreviewFilter) tea.Cmd {
+func loadMoreDataCmd(opts Options, name string, schema string, table string, offset int, limit int, sortColumn string, sortDesc bool, uniqueColumn string, filters []db.PreviewFilter) tea.Cmd {
 	return func() tea.Msg {
 		session, err := openSession(opts, name, schema)
 		if err != nil {
@@ -2679,7 +2726,7 @@ func loadMoreDataCmd(opts Options, name string, schema string, table string, off
 		}
 		defer session.Conn.Close(context.Background())
 
-		sql, args := db.BuildPreviewQuery(schema, table, limit, offset, sortColumn, sortDesc, filters)
+		sql, args := db.BuildPreviewQuery(schema, table, limit, offset, sortColumn, sortDesc, uniqueColumn, filters)
 		columns, rows, _, err := db.Query(context.Background(), session.Conn, sql, args...)
 		if err != nil {
 			return dataPageMsg{title: "Data " + table, schema: schema, table: table, offset: offset, pageSize: limit, err: err}
@@ -2696,8 +2743,8 @@ func loadMoreDataCmd(opts Options, name string, schema string, table string, off
 	}
 }
 
-func queryCount(ctx context.Context, conn *pgx.Conn, schema string, table string, filters []db.PreviewFilter) (int, error) {
-	sql, args := db.BuildCountQuery(schema, table, filters)
+func queryCount(ctx context.Context, conn *pgx.Conn, schema string, table string, uniqueColumn string, filters []db.PreviewFilter) (int, error) {
+	sql, args := db.BuildCountQuery(schema, table, uniqueColumn, filters)
 	columns, rows, _, err := db.Query(ctx, conn, sql, args...)
 	if err != nil {
 		return 0, err

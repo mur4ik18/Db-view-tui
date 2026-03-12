@@ -31,6 +31,7 @@ type DataPreset struct {
 	PageSize     int                `yaml:"page_size,omitempty"`
 	SortColumn   string             `yaml:"sort_column,omitempty"`
 	SortDesc     bool               `yaml:"sort_desc,omitempty"`
+	UniqueColumn string             `yaml:"unique_column,omitempty"`
 	PinnedColumn string             `yaml:"pinned_column,omitempty"`
 	Filters      []DataPresetFilter `yaml:"filters,omitempty"`
 }

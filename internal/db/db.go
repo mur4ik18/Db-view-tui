@@ -293,7 +293,7 @@ func buildFilteredFromClause(schema string, table string, filters []PreviewFilte
 	return builder.String(), args
 }
 
-func BuildPreviewQuery(schema string, table string, limit int, offset int, sortColumn string, sortDesc bool, filters []PreviewFilter) (string, []any) {
+func BuildPreviewQuery(schema string, table string, limit int, offset int, sortColumn string, sortDesc bool, distinctColumn string, filters []PreviewFilter) (string, []any) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -303,15 +303,51 @@ func BuildPreviewQuery(schema string, table string, limit int, offset int, sortC
 
 	fromClause, args := buildFilteredFromClause(schema, table, filters)
 	var builder strings.Builder
-	builder.WriteString("SELECT *")
-	builder.WriteString(fromClause)
-	if sortColumn != "" {
+	distinctColumn = strings.TrimSpace(distinctColumn)
+	sortColumn = strings.TrimSpace(sortColumn)
+
+	if distinctColumn != "" {
+		builder.WriteString("SELECT * FROM (SELECT DISTINCT ON (")
+		builder.WriteString(QuoteIdentifier(distinctColumn))
+		builder.WriteString(") *")
+		builder.WriteString(fromClause)
 		builder.WriteString(" ORDER BY ")
-		builder.WriteString(QuoteIdentifier(sortColumn))
-		if sortDesc {
-			builder.WriteString(" DESC")
+		builder.WriteString(QuoteIdentifier(distinctColumn))
+		builder.WriteString(" ASC")
+		if sortColumn != "" && !strings.EqualFold(sortColumn, distinctColumn) {
+			builder.WriteString(", ")
+			builder.WriteString(QuoteIdentifier(sortColumn))
+			if sortDesc {
+				builder.WriteString(" DESC")
+			} else {
+				builder.WriteString(" ASC")
+			}
+		}
+		builder.WriteString(") AS preview")
+		if sortColumn != "" {
+			builder.WriteString(" ORDER BY ")
+			builder.WriteString(QuoteIdentifier(sortColumn))
+			if sortDesc {
+				builder.WriteString(" DESC")
+			} else {
+				builder.WriteString(" ASC")
+			}
 		} else {
+			builder.WriteString(" ORDER BY ")
+			builder.WriteString(QuoteIdentifier(distinctColumn))
 			builder.WriteString(" ASC")
+		}
+	} else {
+		builder.WriteString("SELECT *")
+		builder.WriteString(fromClause)
+		if sortColumn != "" {
+			builder.WriteString(" ORDER BY ")
+			builder.WriteString(QuoteIdentifier(sortColumn))
+			if sortDesc {
+				builder.WriteString(" DESC")
+			} else {
+				builder.WriteString(" ASC")
+			}
 		}
 	}
 	builder.WriteString(" OFFSET ")
@@ -322,13 +358,25 @@ func BuildPreviewQuery(schema string, table string, limit int, offset int, sortC
 	return builder.String(), args
 }
 
-func BuildCountQuery(schema string, table string, filters []PreviewFilter) (string, []any) {
+func BuildCountQuery(schema string, table string, distinctColumn string, filters []PreviewFilter) (string, []any) {
 	fromClause, args := buildFilteredFromClause(schema, table, filters)
+	distinctColumn = strings.TrimSpace(distinctColumn)
+	if distinctColumn != "" {
+		var builder strings.Builder
+		builder.WriteString("SELECT count(*) FROM (SELECT DISTINCT ON (")
+		builder.WriteString(QuoteIdentifier(distinctColumn))
+		builder.WriteString(") 1")
+		builder.WriteString(fromClause)
+		builder.WriteString(" ORDER BY ")
+		builder.WriteString(QuoteIdentifier(distinctColumn))
+		builder.WriteString(" ASC) AS counted;")
+		return builder.String(), args
+	}
 	return "SELECT count(*)" + fromClause + ";", args
 }
 
 func BuildPreviewSQL(schema string, table string, limit int, offset int) string {
-	sql, _ := BuildPreviewQuery(schema, table, limit, offset, "", false, nil)
+	sql, _ := BuildPreviewQuery(schema, table, limit, offset, "", false, "", nil)
 	return sql
 }
 
