@@ -4,7 +4,7 @@
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-supported-336791?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 
-`Db View TUI` is a terminal UI for exploring remote PostgreSQL databases.
+`dbctl` is a keyboard-driven terminal UI for PostgreSQL. Browse schemas, filter table data with include/exclude syntax, pin columns while scrolling, and run SQL scripts — all without leaving your terminal.
 
 It combines connection management, schema browsing, table inspection, query execution, and SQL file execution in one keyboard-driven interface. The project is built in Go and uses `Bubble Tea` for the TUI layer.
 
